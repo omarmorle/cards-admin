@@ -14,10 +14,11 @@ services:
       # el host, cambia "3000:3000" por solo "3000".
       - "3000:3000"
     environment:
-      # --- OBLIGATORIO: cámbialos antes de desplegar ---
-      - ADMIN_USER=admin
-      - ADMIN_PASSWORD=cambia-esta-contrasena
-      - API_KEY=cambia-esta-api-key
+      # --- OBLIGATORIO: se toman de las Environment variables del stack en Portainer ---
+      # En Portainer define ADMIN_PASSWORD y API_KEY (no los escribas aquí).
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - API_KEY=${API_KEY}
       # --- Postgres (opcional al inicio) ---
       # Sin DATABASE_URL la app usa JSON en /data y funciona igual.
       # Para usar el Postgres que ya tienes (postgres_evo):
