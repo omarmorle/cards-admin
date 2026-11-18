@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cards-admin — EDOMEXBOT</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><h1>🃏 cards-admin</h1><p>EDOMEXBOT · Panel del admin</p><button id="logoutBtn" class="hidden">Salir</button></header>
+<main>
+  <section id="loginBox" class="card">
+    <h2>Entrar como admin</h2>
+    <p class="muted">Usuario y contraseña del panel (variables ADMIN_USER / ADMIN_PASSWORD).</p>
+    <label>Usuario <input id="loginUser" value="admin" autocomplete="username"></label>
+    <label>Contraseña <input id="loginPass" type="password" autocomplete="current-password"></label>
+    <button id="loginBtn">Entrar</button>
+    <p id="loginMsg" class="error"></p>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="stats" id="stats"></div>
+    <p class="hint">💡 <b>¿Cómo funciona Serie n/m?</b> Cada copia es un ejemplar de una carta. <b>n</b> es el número de copia que le tocó a alguien y <b>m</b> es el máximo de copias de esa carta (lo defines al crearla). Ejemplo: <b>Serie 4/25</b> = copia 4 de 25. Cuando se agotan, esa carta ya no sale en el sorteo.</p>
+
+    <h2>Series (colecciones)</h2>
+    <p class="muted">Una serie es una colección completa: Liga MX, Luchadores de México, o la que tú quieras. El bot sortea cartas de las series activas.</p>
+    <div id="seriesList"></div>
+    <form id="seriesForm" class="card form">
+      <h3 id="seriesFormTitle">Nueva serie</h3>
+      <input type="hidden" id="seriesId">
+      <label>Nombre <input id="seriesName" required placeholder="Ej. Liga MX - Apertura 2026"></label>
+      <label>Slug <input id="seriesSlug" placeholder="liga-mx-apertura-2026 (opcional, se genera solo)"></label>
+      <label>Descripción <input id="seriesDesc" placeholder="¿De qué va esta colección?"></label>
+      <label class="inline"><input type="checkbox" id="seriesActive" checked> Activa</label>
+      <div class="row"><button type="submit">Guardar serie</button><button type="button" id="seriesCancel">Limpiar</button></div>
+    </form>
+
+    <h2>Cartas</h2>
+    <label>Ver serie
+      <select id="cardSeriesFilter"><option value="">Todas</option></select>
+    </label>
+    <div id="cardsList"></div>
+    <form id="cardForm" class="card form">
+      <h3 id="cardFormTitle">Nueva carta</h3>
+      <input type="hidden" id="cardId">
+      <label>Serie <select id="cardSeries" required></select></label>
+      <label>Nombre <input id="cardName" required placeholder="Ej. Henry Martín"></label>
+      <label>Equipo / grupo <input id="cardTeam" placeholder="Ej. América"></label>
+      <label>Posición / rol <input id="cardPos" placeholder="Ej. Delantero"></label>
+      <label>Rareza
+        <select id="cardRarity"><option>Común</option><option>Raro</option><option>Épico</option><option>Legendario</option></select>
+      </label>
+      <label>Máx. de copias (m) <input id="cardMax" type="number" min="1" value="100"></label>
+      <label>Valor (monedas) <input id="cardValue" type="number" min="0" value="10"></label>
+      <label>Imagen (URL) <input id="cardImage" placeholder="https://… o sube una imagen abajo"></label>
+      <label>Subir imagen anime (jpg/png/webp, máx. 5 MB) <input id="cardUpload" type="file" accept=".jpg,.jpeg,.png,.webp"></label>
+      <div id="cardPreview"></div>
+      <label class="inline"><input type="checkbox" id="cardActive" checked> Activa</label>
+      <div class="row"><button type="submit">Guardar carta</button><button type="button" id="cardCancel">Limpiar</button></div>
+    </form>
+
+    <h2>Copias emitidas</h2>
+    <div class="row">
+      <input id="copySearch" placeholder="Buscar por carta, usuario o serie…">
+      <button id="copySearchBtn">Buscar</button>
+    </div>
+    <div id="copiesList"></div>
+
+    <h2>Usuarios</h2>
+    <div id="usersList"></div>
+    <div id="userInv"></div>
+
+    <h2>Datos</h2>
+    <div class="row">
+      <button id="seedBtn">Cargar datos de ejemplo (solo si está vacío)</button>
+      <button id="exportBtn">Exportar catálogo (JSON)</button>
+    </div>
+    <pre id="exportOut"></pre>
+    <p id="msg"></p>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
