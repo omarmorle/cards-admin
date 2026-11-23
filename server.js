@@ -127,8 +127,30 @@ app.put('/api/admin/cards/:id', adminAuth, handle(async (req, res) => {
 }));
 app.delete('/api/admin/cards/:id', adminAuth, handle(async (req, res) => { await store.deleteCard(req.params.id); res.json({ ok: true }); }));
 
+// Importación masiva de cartas desde CSV (el CSV se parsea en el cliente y
+// llega aquí como JSON). Cada fila se valida con las mismas reglas que
+// createCard (rareza válida, max_copies > 0, la serie debe existir).
+// Respuesta: { imported, failed: [{ row, name, error }], total }.
+app.post('/api/admin/import-cards', adminAuth, handle(async (req, res) => {
+  const { series_id, cards } = req.body || {};
+  if (!series_id) return res.status(400).json({ error: 'Falta series_id (la serie destino).' });
+  if (!Array.isArray(cards) || !cards.length) return res.status(400).json({ error: 'Falta el arreglo "cards" con al menos una fila.' });
+  if (cards.length > 500) return res.status(400).json({ error: 'Máximo 500 cartas por importación.' });
+  const failed = [];
+  let imported = 0;
+  for (let i = 0; i < cards.length; i++) {
+    const row = cards[i] || {};
+    try {
+      if (!row.name || !String(row.name).trim()) { const e = new Error('Falta el nombre.'); e.status = 400; throw e; }
+      await store.createCard({ ...row, series_id });
+      imported++;
+    } catch (e) { failed.push({ row: i + 1, name: row.name || '', error: e.message }); }
+  }
+  res.json({ imported, failed, total: cards.length });
+}));
+
 app.get('/api/admin/copies', adminAuth, handle(async (req, res) => res.json(await store.listCopies(req.query))));
-app.get('/api/admin/users', adminAuth, handle(async (req, res) => res.json(await store.listUsers())));
+app.get('/api/admin/users', adminAuth, handle(async (req, res) => res.json(await store.listUsers(req.query))));
 app.get('/api/admin/users/:phone/inventory', adminAuth, handle(async (req, res) => res.json(await store.getUserInventory(req.params.phone))));
 app.post('/api/admin/seed', adminAuth, handle(async (req, res) => {
   const seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'seed.json'), 'utf8'));
@@ -141,7 +163,11 @@ app.get('/api/public/series', publicAuth, handle(async (req, res) => {
   const all = await store.listSeries();
   res.json(all.filter(s => s.active));
 }));
-app.get('/api/public/cards', publicAuth, handle(async (req, res) => res.json(await store.listCards({ ...req.query, activeOnly: true }))));
+app.get('/api/public/cards', publicAuth, handle(async (req, res) => {
+  // La API pública siempre devuelve el arreglo completo (sin paginación).
+  const { page, limit, ...filters } = req.query;
+  res.json(await store.listCards({ ...filters, activeOnly: true }));
+}));
 app.post('/api/public/roll', publicAuth, handle(async (req, res) => {
   const { series_id, group_jid, rolled_by_phone } = req.body || {};
   const out = await store.roll({ series_id, group_jid, rolled_by_phone });

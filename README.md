@@ -70,20 +70,114 @@ Al arrancar con la base vacía se siembran solos:
    apuntando a `http://cards-admin:3000` (o a `http://<IP-de-la-VM>:3000`).
    Con eso el panel queda con HTTPS y sin exponer puertos extra.
 
-## Cómo conectar Postgres (después, cuando quieras)
+## Cómo conectar Postgres (base de datos real)
 
-1. En Portainer abre el stack **whatsapp-bot** y copia la configuración
-   de `postgres_evo`: usuario, contraseña y nombre de la base de datos.
-   Esos datos **no** están en este repo, no los inventé.
-2. En el stack `cards-admin` añade la variable:
-   `DATABASE_URL=postgres://USUARIO:CONTRASENA@postgres_evo:5432/NOMBRE_DB`
-   (con tus datos reales) y reinicia el stack.
-3. Al arrancar, la app crea las tablas sola con `schema.sql`. Si prefieres
-   crearlas a mano, el archivo está en la raíz del proyecto.
-4. Ojo: el panel en modo JSON y en modo Postgres **no comparten datos**.
-   Si ya sembraste cartas en JSON y luego cambias a Postgres, tendrás
-   que sembrar de nuevo (botón *Cargar datos de ejemplo*) o exportar el
-   catálogo desde el panel y volver a cargarlo.
+Hasta ahora el panel corría en **modo JSON** (un archivo
+`cards-data.json`). Para pasarlo a **Postgres real** hay que migrar los
+datos que ya existen, porque JSON y Postgres no comparten nada.
+
+### Migrar de JSON a Postgres
+
+El script `scripts/migrate.js` copia el JSON completo a Postgres con el
+estado exacto (mismos ids, fechas, series, cartas, copias, usuarios,
+drops y transacciones). También **crea la base de datos `cards_admin`**
+si no existe, separada de la de Evolution API.
+
+**Orden recomendado** (en producción, en Portainer):
+
+1. En el stack `cards-admin` define la variable:
+   `DATABASE_URL=postgres://USUARIO:CONTRASENA@postgres_evo:5432/cards_admin`
+   con el usuario y la contraseña de `postgres_evo` (del stack
+   whatsapp-bot). La BD `cards_admin` no tiene que existir: la crea el
+   script. **No** pongas la contraseña en el `docker-compose.yml`.
+2. Despliega el stack con el código nuevo (que ya incluye
+   `scripts/migrate.js`).
+3. Antes de arrancar con `DATABASE_URL`, abre la consola del contenedor
+   en Portainer (**Containers → cards-admin → Exec**) y corre:
+   ```bash
+   DATABASE_URL=postgres://USUARIO:CONTRASENA@postgres_evo:5432/cards_admin DATA_DIR=/data npm run migrate
+   ```
+   El script crea la BD, aplica `schema.sql` y copia el JSON. Al final
+   verifica que los conteos coincidan y te lo muestra.
+4. Reinicia el contenedor. Al arrancar con `DATABASE_URL`, la app usa
+   Postgres. El archivo JSON queda intacto como respaldo.
+
+**Si el servidor ya arrancó antes con `DATABASE_URL` y se sembró solo:**
+al arrancar en modo Postgres con la BD vacía, la app siembra las 2
+series y 9 cartas de ejemplo. En ese caso la migración se negaría para
+no duplicar. Corre entonces con el flag `--reset-catalog`, que vacía
+las 6 tablas antes de insertar el JSON:
+```bash
+DATABASE_URL=... DATA_DIR=/data node scripts/migrate.js --reset-catalog
+```
+
+**Si no hay JSON que migrar** (instalación nueva): la app crea las
+tablas sola, pero **no crea la base de datos**. Primero crea la BD y el
+esquema con el script en modo vacío y luego arranca (ahí sí siembra
+solos los datos de ejemplo):
+```bash
+DATABASE_URL=postgres://USUARIO:CONTRASENA@postgres_evo:5432/cards_admin npm run migrate --init-empty
+```
+
+**Volver a JSON:** quita `DATABASE_URL` y reinicia. El modo JSON sigue
+funcionando como antes (fallback). Ojo: los datos de Postgres no vuelven
+solos al JSON; habría que exportar el catálogo desde el panel.
+
+## Paginación
+
+Las listas del panel (cartas, copias y usuarios) paginan de **20 en 20**.
+La API acepta `?page=N&limit=M` (límite máximo 100 por página):
+
+```bash
+GET /api/admin/cards?page=2&limit=20
+GET /api/admin/copies?page=1&limit=20&search=canales
+GET /api/admin/users?page=1&limit=20
+```
+
+Respuesta:
+```json
+{ "items": [ ... ], "page": 2, "limit": 20, "total": 35, "pages": 2 }
+```
+
+Sin `page` ni `limit` la API devuelve el arreglo completo como antes
+(compatibilidad: así la siguen usando el sorteo y la API pública).
+
+## Importar cartas desde CSV
+
+En el panel, sección **Importar cartas desde CSV**: elige la serie
+destino, sube el `.csv`, revisa la **vista previa** y confirma.
+
+Formato (primera fila = encabezados):
+
+```csv
+name,team_or_group,position_or_role,rarity,max_copies,image_url,value
+Henry Martín,América,Delantero,Épico,25,,100
+Luis Malagón,América,Portero,Común,500,,10
+```
+
+- Columnas: `name` (obligatoria), `team_or_group`,
+  `position_or_role`, `rarity`, `max_copies`, `image_url`, `value`.
+- `rarity` debe ser `Común`, `Raro`, `Épico` o `Legendario`
+  (si se deja vacía, queda `Común`). `max_copies` debe ser mayor que 0.
+- Los valores con comas van entre comillas: `"Pérez, Juan"`.
+- El panel tiene un botón **Descargar plantilla CSV** con el formato.
+- Al importar, el servidor valida cada fila con las mismas reglas que
+  al crear una carta a mano y te reporta cuántas se importaron y cuáles
+  fallaron, con el número de fila y el motivo
+  (ej. `Fila 26 (Carta Mala): Rareza inválida…`). Máximo 500 por vez.
+- Endpoint (por si lo quieres usar directo):
+  `POST /api/admin/import-cards` con `{ series_id, cards: [...] }` y
+  sesión de admin.
+
+## Lo que todavía tienes que hacer tú
+
+- [ ] Desplegar el stack en Portainer y poner tu `ADMIN_PASSWORD` y `API_KEY`.
+- [ ] Añadir el hostname en Cloudflare Tunnel (ej. `admin.omarmoreno.dev`).
+- [ ] Migrar a Postgres con `scripts/migrate.js` (ver arriba) cuando
+      quieras dejar el JSON.
+- [ ] Subir las imágenes anime de las cartas (sin escudos ni logos).
+- [ ] Cambiar en n8n el `!roll` quemado por la llamada a `/api/public/roll` y el `!claim` por `/api/public/claim` (ver `n8n/roll-claim-notes.md`).
+- [ ] Probar `!roll` y `!claim` en un grupo de prueba antes de usarlo en serio.
 
 ## Imágenes
 
@@ -109,15 +203,6 @@ Ver el detalle y los nodos en `n8n/roll-claim-notes.md`. Resumen:
 - `GET /api/public/inventory?phone=...` → copias de ese usuario con su Serie n/m.
 - `GET /api/public/series` y `GET /api/public/cards?series_id=&rarity=` → catálogo.
 
-## Lo que todavía tienes que hacer tú
-
-- [ ] Desplegar el stack en Portainer y poner tu `ADMIN_PASSWORD` y `API_KEY`.
-- [ ] Añadir el hostname en Cloudflare Tunnel (ej. `admin.omarmoreno.dev`).
-- [ ] Poner las credenciales reales de `postgres_evo` en `DATABASE_URL` cuando quieras pasar de JSON a Postgres.
-- [ ] Subir las imágenes anime de las cartas (sin escudos ni logos).
-- [ ] Cambiar en n8n el `!roll` quemado por la llamada a `/api/public/roll` y el `!claim` por `/api/public/claim` (ver `n8n/roll-claim-notes.md`).
-- [ ] Probar `!roll` y `!claim` en un grupo de prueba antes de usarlo en serio.
-
 ## Probarlo en local (sin Docker)
 
 ```bash
@@ -125,4 +210,13 @@ npm install
 PORT=3100 DATA_DIR=/tmp/cards-admin-test ADMIN_PASSWORD=admin123 API_KEY=test-key node server.js
 # Panel: http://localhost:3100  (admin / admin123)
 # Salud: curl http://localhost:3100/api/health
+```
+
+Probar la migración a Postgres en local (con un Postgres corriendo en
+tu máquina):
+
+```bash
+DATABASE_URL=postgres://usuario:contrasena@localhost:5432/cards_admin DATA_DIR=/tmp/cards-admin-test npm run migrate
+# Arrancar en modo Postgres:
+DATABASE_URL=postgres://usuario:contrasena@localhost:5432/cards_admin PORT=3100 DATA_DIR=/tmp/cards-admin-test ADMIN_PASSWORD=admin123 API_KEY=test-key node server.js
 ```

@@ -19,15 +19,19 @@ services:
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - API_KEY=${API_KEY}
-      # --- Postgres (opcional al inicio) ---
+      # --- Postgres ---
       # Sin DATABASE_URL la app usa JSON en /data y funciona igual.
-      # Para usar el Postgres que ya tienes (postgres_evo):
-      # 1) En Portainer abre el stack whatsapp-bot y copia de su
-      #    configuración el usuario, la contraseña y el nombre de la
-      #    base de datos de postgres_evo. NO están en este archivo.
-      # 2) Descomenta la línea y rellénala con esos datos reales:
-      # - DATABASE_URL=postgres://USUARIO:CONTRASENA@postgres_evo:5432/NOMBRE_DB
-      # 3) Reinicia el stack. La app crea las tablas sola (schema.sql).
+      # Para usar Postgres real (una BD separada de la de Evolution):
+      # 1) En Portainer define la variable DATABASE_URL con el valor:
+      #      postgres://USUARIO:CONTRASENA@postgres_evo:5432/cards_admin
+      #    (usuario y contraseña de postgres_evo, del stack whatsapp-bot;
+      #    la BD "cards_admin" la crea el script de migración).
+      # 2) Antes del primer arranque con DATABASE_URL, corre la migración
+      #    del JSON existente (ver README, sección "Migrar de JSON a
+      #    Postgres") o arranca con la BD vacía y se siembra sola.
+      # DATABASE_URL nunca va quemado aquí: viene de las Environment
+      # variables del stack en Portainer.
+      - DATABASE_URL=${DATABASE_URL:-}
       - DATA_DIR=/data
       - PORT=3000
     volumes:

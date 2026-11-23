@@ -30,6 +30,25 @@ function pickWeighted(raritiesPresent) {
   return raritiesPresent[raritiesPresent.length - 1];
 }
 
+// ---- paginación ----
+// Si la consulta trae page o limit, se devuelve { items, page, limit, total, pages }.
+// Sin ellos se devuelve el arreglo completo (compatibilidad: el sorteo y la
+// API pública siguen recibiendo arreglos).
+function pageParams(q = {}) {
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(q.limit, 10) || 20));
+  return { page, limit, offset: (page - 1) * limit };
+}
+function pageWanted(q = {}) { return q.page !== undefined || q.limit !== undefined; }
+function pageResult(items, total, { page, limit }) {
+  return { items, page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) };
+}
+function paginateArray(all, q) {
+  if (!pageWanted(q)) return all;
+  const p = pageParams(q);
+  return pageResult(all.slice(p.offset, p.offset + p.limit), all.length, p);
+}
+
 class BaseStore {
   async expireDrops() { /* implementado en cada modo */ }
   async issuedCount(cardId) { throw new Error('not implemented'); }
@@ -120,12 +139,13 @@ class JsonStore extends BaseStore {
     this.data.drops = this.data.drops.filter(d => !cardIds.includes(d.card_id));
     this._save(); return true;
   }
-  async listCards({ series_id, rarity, activeOnly } = {}) {
+  async listCards({ series_id, rarity, activeOnly, page, limit } = {}) {
     let out = [...this.data.cards];
     if (series_id) out = out.filter(c => c.series_id === series_id);
     if (rarity) out = out.filter(c => c.rarity === rarity);
     if (activeOnly) out = out.filter(c => c.active);
-    return out.sort((a, b) => a.name.localeCompare(b.name));
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return paginateArray(out, { page, limit });
   }
   async getCard(id) { return this.data.cards.find(c => c.id === id) || null; }
   async createCard(d) {
@@ -151,16 +171,21 @@ class JsonStore extends BaseStore {
     const series = this.data.series.find(s => s.id === card.series_id) || {};
     return { ...cp, card_name: card.name || '', series_name: series.name || '', series_id: card.series_id || '', team_or_group: card.team_or_group || '', rarity: card.rarity || '', image_url: card.image_url || '', serie: `${cp.serial_n}/${cp.serial_m}` };
   }
-  async listCopies({ series_id, card_id, user_phone, search, limit = 200 } = {}) {
+  async listCopies({ series_id, card_id, user_phone, search, limit = 200, page } = {}) {
     let out = this.data.copies.map(c => this._enrichCopy(c));
     if (card_id) out = out.filter(c => c.card_id === card_id);
     if (series_id) out = out.filter(c => c.series_id === series_id);
     if (user_phone) out = out.filter(c => c.user_phone === user_phone);
     if (search) { const q = search.toLowerCase(); out = out.filter(c => (c.card_name + ' ' + c.user_phone + ' ' + c.series_name).toLowerCase().includes(q)); }
-    return out.slice(-limit).reverse();
+    out.sort((a, b) => new Date(b.claimed_at) - new Date(a.claimed_at));
+    if (page !== undefined) return paginateArray(out, { page, limit });
+    return out.slice(0, limit);
   }
-  async listUsers() {
-    return this.data.users.map(u => ({ ...u, copies: this.data.copies.filter(c => c.user_phone === u.phone).length }));
+  async listUsers({ page, limit } = {}) {
+    const all = this.data.users
+      .map(u => ({ ...u, copies: this.data.copies.filter(c => c.user_phone === u.phone).length }))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    return paginateArray(all, { page, limit });
   }
   async getUserInventory(phone) {
     const user = this.data.users.find(u => u.phone === phone) || null;
@@ -256,13 +281,21 @@ class PgStore extends BaseStore {
     return r.rows[0];
   }
   async deleteSeries(id) { await this.pool.query('DELETE FROM series WHERE id=$1', [id]); return true; }
-  async listCards({ series_id, rarity, activeOnly } = {}) {
+  async listCards({ series_id, rarity, activeOnly, page, limit } = {}) {
     const where = [], params = [];
     if (series_id) { params.push(series_id); where.push(`series_id=$${params.length}`); }
     if (rarity) { params.push(rarity); where.push(`rarity=$${params.length}`); }
     if (activeOnly) where.push('active=TRUE');
-    const sql = 'SELECT * FROM cards' + (where.length ? ' WHERE ' + where.join(' AND ') : '') + ' ORDER BY name';
-    return (await this.pool.query(sql, params)).rows;
+    const clause = where.length ? ' WHERE ' + where.join(' AND ') : '';
+    if (!pageWanted({ page, limit })) {
+      return (await this.pool.query('SELECT * FROM cards' + clause + ' ORDER BY name', params)).rows;
+    }
+    const p = pageParams({ page, limit });
+    const total = (await this.pool.query('SELECT COUNT(*)::int AS n FROM cards' + clause, params)).rows[0].n;
+    const rows = (await this.pool.query(
+      'SELECT * FROM cards' + clause + ` ORDER BY name LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, p.limit, p.offset])).rows;
+    return pageResult(rows, total, p);
   }
   async getCard(id) { return (await this.pool.query('SELECT * FROM cards WHERE id=$1', [id])).rows[0] || null; }
   async createCard(d) {
@@ -288,23 +321,37 @@ class PgStore extends BaseStore {
     return r.rows[0];
   }
   async deleteCard(id) { await this.pool.query('DELETE FROM cards WHERE id=$1', [id]); return true; }
-  async listCopies({ series_id, card_id, user_phone, search, limit = 200 } = {}) {
+  async listCopies({ series_id, card_id, user_phone, search, limit = 200, page } = {}) {
     const where = [], params = [];
     if (card_id) { params.push(card_id); where.push(`cp.card_id=$${params.length}`); }
     if (series_id) { params.push(series_id); where.push(`c.series_id=$${params.length}`); }
     if (user_phone) { params.push(user_phone); where.push(`cp.user_phone=$${params.length}`); }
     if (search) { params.push(`%${search}%`); where.push(`(c.name ILIKE $${params.length} OR cp.user_phone ILIKE $${params.length} OR s.name ILIKE $${params.length})`); }
-    params.push(limit);
-    const sql = `SELECT cp.*, c.name AS card_name, c.series_id, c.team_or_group, c.rarity, c.image_url, s.name AS series_name,
+    const clause = where.length ? ' WHERE ' + where.join(' AND ') : '';
+    const base = `SELECT cp.*, c.name AS card_name, c.series_id, c.team_or_group, c.rarity, c.image_url, s.name AS series_name,
                  (cp.serial_n || '/' || cp.serial_m) AS serie
-                 FROM copies cp JOIN cards c ON c.id=cp.card_id JOIN series s ON s.id=c.series_id
-                 ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-                 ORDER BY cp.claimed_at DESC LIMIT $${params.length}`;
-    return (await this.pool.query(sql, params)).rows;
+                 FROM copies cp JOIN cards c ON c.id=cp.card_id JOIN series s ON s.id=c.series_id`;
+    if (page === undefined) {
+      params.push(limit);
+      return (await this.pool.query(base + clause + ` ORDER BY cp.claimed_at DESC LIMIT $${params.length}`, params)).rows;
+    }
+    const p = pageParams({ page, limit });
+    const total = (await this.pool.query(
+      `SELECT COUNT(*)::int AS n FROM copies cp JOIN cards c ON c.id=cp.card_id JOIN series s ON s.id=c.series_id` + clause, params)).rows[0].n;
+    const rows = (await this.pool.query(
+      base + clause + ` ORDER BY cp.claimed_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, p.limit, p.offset])).rows;
+    return pageResult(rows, total, p);
   }
-  async listUsers() {
-    return (await this.pool.query(
-      `SELECT u.*, (SELECT COUNT(*)::int FROM copies cp WHERE cp.user_phone=u.phone) AS copies FROM users u ORDER BY u.created_at DESC`)).rows;
+  async listUsers({ page, limit } = {}) {
+    const sql = `SELECT u.*, (SELECT COUNT(*)::int FROM copies cp WHERE cp.user_phone=u.phone) AS copies FROM users u`;
+    if (!pageWanted({ page, limit })) {
+      return (await this.pool.query(sql + ' ORDER BY u.created_at DESC')).rows;
+    }
+    const p = pageParams({ page, limit });
+    const total = (await this.pool.query('SELECT COUNT(*)::int AS n FROM users')).rows[0].n;
+    const rows = (await this.pool.query(sql + ' ORDER BY u.created_at DESC LIMIT $1 OFFSET $2', [p.limit, p.offset])).rows;
+    return pageResult(rows, total, p);
   }
   async getUserInventory(phone) {
     const user = (await this.pool.query('SELECT * FROM users WHERE phone=$1', [phone])).rows[0] || null;
