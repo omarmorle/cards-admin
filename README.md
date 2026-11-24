@@ -200,8 +200,28 @@ Ver el detalle y los nodos en `n8n/roll-claim-notes.md`. Resumen:
   mandar al grupo.
 - `POST /api/public/claim` `{drop_id, phone, display_name}` → el primer
   claim gana; el segundo recibe error 409.
+- `POST /api/public/gift` `{copy_id, from_phone, to_phone, to_display_name?}` →
+  regala una copia a otro usuario. Valida: campos faltantes → 400, regalo
+  a uno mismo → 400, copia inexistente → 404, la copia no es de
+  `from_phone` → 409, copia desechada (`scrapped`) → 409. Crea el usuario
+  receptor si no existe, cambia el dueño, pone `status: 'gifted'` y registra
+  una transacción `gift`. Devuelve `{ copy, card, serie: "n/m" }` con la
+  copia enriquecida igual que el claim.
 - `GET /api/public/inventory?phone=...` → copias de ese usuario con su Serie n/m.
 - `GET /api/public/series` y `GET /api/public/cards?series_id=&rarity=` → catálogo.
+
+### Qué significa `copies.status`
+
+El `status` de una copia dice **cómo llegó a su dueño actual**:
+
+- `owned` — reclamada directo con `!claim`.
+- `gifted` — llegó por regalo (`!gift`).
+- `traded` — llegó por intercambio (`!trade`, pendiente).
+- `scrapped` — desechada (`!scrap`, pendiente); no se puede regalar.
+
+El inventario (`/api/public/inventory`) no filtra por `status`: muestra
+todas las copias del teléfono, así que una carta regalada aparece en el
+inventario del nuevo dueño sin más cambios.
 
 ## Probarlo en local (sin Docker)
 

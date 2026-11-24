@@ -215,6 +215,24 @@ class JsonStore extends BaseStore {
     this._save();
     return { copy: this._enrichCopy(copy), card };
   }
+  async gift({ copy_id, from_phone, to_phone, to_display_name }) {
+    // Proceso único de Node: comprobar + actualizar es atómico en el mismo tick.
+    const copy = this.data.copies.find(c => c.id === copy_id);
+    if (!copy) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+    if (copy.user_phone !== from_phone) { const e = new Error('Esa carta no es tuya.'); e.status = 409; throw e; }
+    if (copy.status === 'scrapped') { const e = new Error('Esa carta fue desechada.'); e.status = 409; throw e; }
+    if (!this.data.users.some(u => u.phone === to_phone)) {
+      this.data.users.push({ phone: to_phone, display_name: to_display_name || '', created_at: new Date().toISOString() });
+    }
+    // status = cómo llegó la copia a su dueño actual: 'owned' (claim directo),
+    // 'gifted' (regalo), 'traded' (intercambio), 'scrapped' (desechada).
+    copy.user_phone = to_phone;
+    copy.status = 'gifted';
+    this.data.transactions.push({ id: uid(), type: 'gift', copy_id: copy.id, from_phone, to_phone, created_at: new Date().toISOString() });
+    this._save();
+    const card = await this.getCard(copy.card_id);
+    return { copy: this._enrichCopy(copy), card };
+  }
   async seedIfEmpty(seed) {
     if (this.data.series.length) return { seeded: false };
     for (const s of seed.series) await this.createSeries(s);
@@ -386,6 +404,31 @@ class PgStore extends BaseStore {
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       if (e.code === '23505') { const err = new Error('Ese número de serie ya fue asignado.'); err.status = 409; throw err; }
+      if (e.status) throw e;
+      throw e;
+    } finally { client.release(); }
+  }
+  async gift({ copy_id, from_phone, to_phone, to_display_name }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const cr = await client.query('SELECT * FROM copies WHERE id=$1 FOR UPDATE', [copy_id]);
+      const copy = cr.rows[0];
+      if (!copy) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+      if (copy.user_phone !== from_phone) { const e = new Error('Esa carta no es tuya.'); e.status = 409; throw e; }
+      if (copy.status === 'scrapped') { const e = new Error('Esa carta fue desechada.'); e.status = 409; throw e; }
+      await client.query('INSERT INTO users(phone, display_name) VALUES($1,$2) ON CONFLICT (phone) DO NOTHING', [to_phone, to_display_name || '']);
+      const upd = await client.query(
+        `UPDATE copies SET user_phone=$2, status='gifted' WHERE id=$1 RETURNING *`,
+        [copy_id, to_phone]);
+      await client.query(`INSERT INTO transactions(id, type, copy_id, from_phone, to_phone) VALUES($1,'gift',$2,$3,$4)`, [uid(), copy_id, from_phone, to_phone]);
+      await client.query('COMMIT');
+      const row = upd.rows[0];
+      const card = (await this.pool.query('SELECT * FROM cards WHERE id=$1', [copy.card_id])).rows[0] || null;
+      const series = card ? (await this.pool.query('SELECT * FROM series WHERE id=$1', [card.series_id])).rows[0] || null : null;
+      return { copy: { ...row, card_name: card?.name || '', series_name: series?.name || '', team_or_group: card?.team_or_group || '', rarity: card?.rarity || '', image_url: card?.image_url || '', serie: `${row.serial_n}/${row.serial_m}` }, card };
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
       if (e.status) throw e;
       throw e;
     } finally { client.release(); }

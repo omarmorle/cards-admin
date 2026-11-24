@@ -179,6 +179,13 @@ app.post('/api/public/claim', publicAuth, handle(async (req, res) => {
   const out = await store.claim({ drop_id, phone, display_name });
   res.json({ copy: out.copy, card: out.card, serie: out.copy.serie || `${out.copy.serial_n}/${out.copy.serial_m}` });
 }));
+app.post('/api/public/gift', publicAuth, handle(async (req, res) => {
+  const { copy_id, from_phone, to_phone, to_display_name } = req.body || {};
+  if (!copy_id || !from_phone || !to_phone) return res.status(400).json({ error: 'Faltan copy_id, from_phone y to_phone.' });
+  if (to_phone === from_phone) return res.status(400).json({ error: 'No puedes regalarte una carta a ti mismo.' });
+  const out = await store.gift({ copy_id, from_phone, to_phone, to_display_name });
+  res.json({ copy: out.copy, card: out.card, serie: out.copy.serie || `${out.copy.serial_n}/${out.copy.serial_m}` });
+}));
 app.get('/api/public/inventory', publicAuth, handle(async (req, res) => {
   if (!req.query.phone) return res.status(400).json({ error: 'Falta ?phone=.' });
   res.json(await store.getUserInventory(String(req.query.phone)));
