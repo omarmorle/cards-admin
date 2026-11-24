@@ -186,6 +186,19 @@ app.post('/api/public/gift', publicAuth, handle(async (req, res) => {
   const out = await store.gift({ copy_id, from_phone, to_phone, to_display_name });
   res.json({ copy: out.copy, card: out.card, serie: out.copy.serie || `${out.copy.serial_n}/${out.copy.serial_m}` });
 }));
+app.post('/api/public/scrap', publicAuth, handle(async (req, res) => {
+  const { copy_id, phone } = req.body || {};
+  if (!copy_id || !phone) return res.status(400).json({ error: 'Faltan copy_id y phone.' });
+  const out = await store.scrap({ copy_id, phone });
+  res.json({ copy: out.copy, card: out.card, serie: out.copy.serie || `${out.copy.serial_n}/${out.copy.serial_m}` });
+}));
+app.post('/api/public/trade', publicAuth, handle(async (req, res) => {
+  const { copy_id_a, phone_a, copy_id_b, phone_b, to_display_name_a, to_display_name_b } = req.body || {};
+  if (!copy_id_a || !phone_a || !copy_id_b || !phone_b) return res.status(400).json({ error: 'Faltan copy_id_a, phone_a, copy_id_b y phone_b.' });
+  if (phone_a === phone_b) return res.status(400).json({ error: 'No puedes intercambiar cartas contigo mismo.' });
+  const out = await store.trade({ copy_id_a, phone_a, copy_id_b, phone_b, to_display_name_a, to_display_name_b });
+  res.json({ copy_a: out.copy_a, copy_b: out.copy_b, card_a: out.card_a, card_b: out.card_b });
+}));
 app.get('/api/public/inventory', publicAuth, handle(async (req, res) => {
   if (!req.query.phone) return res.status(400).json({ error: 'Falta ?phone=.' });
   res.json(await store.getUserInventory(String(req.query.phone)));

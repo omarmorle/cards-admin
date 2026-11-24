@@ -19,13 +19,15 @@ una web. El sistema es **abstracto**: no está atado a la Liga MX.
 ## ¿Cómo funciona Serie n/m?
 
 Cada carta tiene un máximo de copias `m` que tú defines al crearla
-(un común puede ser 500, un épico 25). Al sortear se reserva el siguiente
-número `n`: copias ya emitidas + 1. Si `n > m`, esa carta ya no sale.
+(un común puede ser 500, un épico 25). Al sortear se reserva un número
+`n` **al azar** entre los libres de esa carta (de 1 a `m`, sin repetir
+los que ya tienen copia o están en un drop pendiente). El número bajo
+sigue siendo más cotizado, pero ya no sale en orden: la primera copia
+puede ser 7/25 y la segunda 2/25.
 
-Ejemplo: Henry Martín, Épico, `m = 25`. La primera persona que lo reclama
-tiene **Serie 1/25**, la siguiente **Serie 2/25**, y así. El `1/25` es el
-más cotizado. El número se reserva en el `!roll`, no en el `!claim`, para
-que dos rolls seguidos no repitan el mismo número.
+El número se reserva en el `!roll`, no en el `!claim`, para que dos
+rolls seguidos no repitan el mismo número. Si ya no quedan números
+libres, esa carta está agotada y no sale.
 
 ## Rareza y sorteo
 
@@ -207,6 +209,17 @@ Ver el detalle y los nodos en `n8n/roll-claim-notes.md`. Resumen:
   receptor si no existe, cambia el dueño, pone `status: 'gifted'` y registra
   una transacción `gift`. Devuelve `{ copy, card, serie: "n/m" }` con la
   copia enriquecida igual que el claim.
+- `POST /api/public/scrap` `{copy_id, phone}` → desecha una copia tuya.
+  Valida: campos faltantes → 400, copia inexistente → 404, la copia no es
+  de `phone` → 409, ya desechada → 409. Pone `status: 'scrapped'` (la copia
+  queda en la base como historial, ya no sale en el inventario) y registra
+  una transacción `scrap`. Devuelve `{ copy, card, serie: "n/m" }`.
+- `POST /api/public/trade` `{copy_id_a, phone_a, copy_id_b, phone_b, to_display_name_a?, to_display_name_b?}` →
+  intercambio directo 1x1: A le da su copia a B y B le da la suya a A.
+  Valida: campos faltantes → 400, intercambio contigo mismo → 400, copia
+  inexistente → 404, dueño equivocado → 409, copia desechada → 409. Ambas
+  copias quedan con `status: 'traded'` y se registran dos transacciones
+  `trade` (una por copia). Devuelve `{ copy_a, copy_b, card_a, card_b }`.
 - `GET /api/public/inventory?phone=...` → copias de ese usuario con su Serie n/m.
 - `GET /api/public/series` y `GET /api/public/cards?series_id=&rarity=` → catálogo.
 
@@ -216,12 +229,13 @@ El `status` de una copia dice **cómo llegó a su dueño actual**:
 
 - `owned` — reclamada directo con `!claim`.
 - `gifted` — llegó por regalo (`!gift`).
-- `traded` — llegó por intercambio (`!trade`, pendiente).
-- `scrapped` — desechada (`!scrap`, pendiente); no se puede regalar.
+- `traded` — llegó por intercambio (`!trade`).
+- `scrapped` — desechada (`!scrap`); no se puede regalar ni intercambiar.
 
-El inventario (`/api/public/inventory`) no filtra por `status`: muestra
-todas las copias del teléfono, así que una carta regalada aparece en el
-inventario del nuevo dueño sin más cambios.
+El inventario (`/api/public/inventory`) muestra las copias del teléfono
+**excepto las desechadas**: una carta con `status: 'scrapped'` ya no es
+parte del inventario (sigue en la base como historial). El panel admin
+sí las sigue viendo en la lista de Copias.
 
 ## Probarlo en local (sin Docker)
 

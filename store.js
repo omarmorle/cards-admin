@@ -2,9 +2,10 @@
 // Misma API en los dos modos:
 //   - DATABASE_URL definido  -> Postgres (pg)
 //   - DATABASE_URL vacío     -> JSON en <DATA_DIR>/cards-data.json
-// Regla Serie n/m: al sortear se reserva serial_n = copias emitidas
-// (copias + drops pendientes no vencidos) + 1. Si n > m, la carta
-// ya no se puede sortear. El !claim solo asigna la copia reservada.
+// Regla Serie n/m: al sortear se reserva un serial_n AL AZAR entre los
+// libres de esa carta (de 1 a max_copies, sin repetir copias existentes
+// ni drops pendientes no vencidos). Si no quedan libres, la carta ya no
+// se puede sortear. El !claim solo asigna la copia reservada.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -52,6 +53,9 @@ function paginateArray(all, q) {
 class BaseStore {
   async expireDrops() { /* implementado en cada modo */ }
   async issuedCount(cardId) { throw new Error('not implemented'); }
+  // Seriales ocupados de una carta: copias existentes + drops pendientes
+  // no vencidos. Los drops vencidos ya liberaron su serial (expireDrops).
+  async usedSerials(cardId) { throw new Error('not implemented'); }
   async roll({ series_id, group_jid, rolled_by_phone }) {
     await this.expireDrops();
     const cards = await this.listCards({ series_id, activeOnly: true });
@@ -68,7 +72,17 @@ class BaseStore {
     const rarity = pickWeighted(present);
     const pool = available.filter(c => c.rarity === rarity);
     const card = pool[Math.floor(Math.random() * pool.length)];
-    const n = (await this.issuedCount(card.id)) + 1;
+    // Serial AL AZAR entre los libres (1..max_copies, sin los ocupados).
+    // Si dos rolls simultáneos eligieran el mismo libre, el claim del
+    // segundo fallaría con 409 por el índice único (card_id, serial_n).
+    const used = await this.usedSerials(card.id);
+    const free = [];
+    for (let i = 1; i <= card.max_copies; i++) if (!used.has(i)) free.push(i);
+    if (!free.length) {
+      const e = new Error('Esa carta acaba de agotar sus copias.');
+      e.status = 409; throw e;
+    }
+    const n = free[Math.floor(Math.random() * free.length)];
     const now = new Date();
     const drop = {
       id: uid(), card_id: card.id, serial_n: n, serial_m: card.max_copies,
@@ -108,6 +122,12 @@ class JsonStore extends BaseStore {
     const copies = this.data.copies.filter(c => c.card_id === cardId).length;
     const pending = this.data.drops.filter(d => d.card_id === cardId && d.status === 'pending').length;
     return copies + pending;
+  }
+  async usedSerials(cardId) {
+    const used = new Set();
+    for (const c of this.data.copies) if (c.card_id === cardId) used.add(c.serial_n);
+    for (const d of this.data.drops) if (d.card_id === cardId && d.status === 'pending') used.add(d.serial_n);
+    return used;
   }
   async _saveDrop(drop) { this.data.drops.push(drop); this._save(); }
   async stats() {
@@ -189,7 +209,10 @@ class JsonStore extends BaseStore {
   }
   async getUserInventory(phone) {
     const user = this.data.users.find(u => u.phone === phone) || null;
-    const copies = await this.listCopies({ user_phone: phone, limit: 500 });
+    // Las desechadas ya no son parte del inventario (el panel admin usa
+    // listCopies() directo y ahí sí se siguen viendo).
+    const copies = (await this.listCopies({ user_phone: phone, limit: 500 }))
+      .filter(c => c.status !== 'scrapped');
     return { user, copies };
   }
   async claim({ drop_id, phone, display_name }) {
@@ -233,6 +256,39 @@ class JsonStore extends BaseStore {
     const card = await this.getCard(copy.card_id);
     return { copy: this._enrichCopy(copy), card };
   }
+  async scrap({ copy_id, phone }) {
+    // Proceso único de Node: comprobar + actualizar es atómico en el mismo tick.
+    const copy = this.data.copies.find(c => c.id === copy_id);
+    if (!copy) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+    if (copy.user_phone !== phone) { const e = new Error('Esa carta no es tuya.'); e.status = 409; throw e; }
+    if (copy.status === 'scrapped') { const e = new Error('Esa carta ya fue desechada.'); e.status = 409; throw e; }
+    // La copia queda en la BD como historial; el inventario ya no la muestra.
+    copy.status = 'scrapped';
+    this.data.transactions.push({ id: uid(), type: 'scrap', copy_id: copy.id, from_phone: phone, to_phone: '', created_at: new Date().toISOString() });
+    this._save();
+    const card = await this.getCard(copy.card_id);
+    return { copy: this._enrichCopy(copy), card };
+  }
+  async trade({ copy_id_a, phone_a, copy_id_b, phone_b, to_display_name_a, to_display_name_b }) {
+    const a = this.data.copies.find(c => c.id === copy_id_a);
+    const b = this.data.copies.find(c => c.id === copy_id_b);
+    if (!a || !b) { const e = new Error('Una de las copias no existe.'); e.status = 404; throw e; }
+    if (a.user_phone !== phone_a || b.user_phone !== phone_b) { const e = new Error('Una de las cartas no es de quien dice ser.'); e.status = 409; throw e; }
+    if (a.status === 'scrapped' || b.status === 'scrapped') { const e = new Error('Una de las cartas fue desechada.'); e.status = 409; throw e; }
+    for (const [phone, name] of [[phone_a, to_display_name_a], [phone_b, to_display_name_b]]) {
+      if (!this.data.users.some(u => u.phone === phone)) {
+        this.data.users.push({ phone, display_name: name || '', created_at: new Date().toISOString() });
+      }
+    }
+    a.user_phone = phone_b; a.status = 'traded';
+    b.user_phone = phone_a; b.status = 'traded';
+    const now = new Date().toISOString();
+    this.data.transactions.push(
+      { id: uid(), type: 'trade', copy_id: a.id, from_phone: phone_a, to_phone: phone_b, created_at: now },
+      { id: uid(), type: 'trade', copy_id: b.id, from_phone: phone_b, to_phone: phone_a, created_at: now });
+    this._save();
+    return { copy_a: this._enrichCopy(a), copy_b: this._enrichCopy(b), card_a: await this.getCard(a.card_id), card_b: await this.getCard(b.card_id) };
+  }
   async seedIfEmpty(seed) {
     if (this.data.series.length) return { seeded: false };
     for (const s of seed.series) await this.createSeries(s);
@@ -265,6 +321,13 @@ class PgStore extends BaseStore {
     const copies = await this.pool.query('SELECT COUNT(*)::int AS n FROM copies WHERE card_id=$1', [cardId]);
     const pending = await this.pool.query(`SELECT COUNT(*)::int AS n FROM drops WHERE card_id=$1 AND status='pending' AND expires_at > NOW()`, [cardId]);
     return copies.rows[0].n + pending.rows[0].n;
+  }
+  async usedSerials(cardId) {
+    const rows = await this.pool.query(
+      `SELECT serial_n FROM copies WHERE card_id=$1
+       UNION SELECT serial_n FROM drops WHERE card_id=$1 AND status='pending' AND expires_at > NOW()`,
+      [cardId]);
+    return new Set(rows.rows.map(r => r.serial_n));
   }
   async _saveDrop(drop) {
     await this.pool.query(
@@ -373,8 +436,17 @@ class PgStore extends BaseStore {
   }
   async getUserInventory(phone) {
     const user = (await this.pool.query('SELECT * FROM users WHERE phone=$1', [phone])).rows[0] || null;
-    const copies = await this.listCopies({ user_phone: phone, limit: 500 });
+    // Las desechadas ya no son parte del inventario (el panel admin usa
+    // listCopies() directo y ahí sí se siguen viendo).
+    const copies = (await this.listCopies({ user_phone: phone, limit: 500 }))
+      .filter(c => c.status !== 'scrapped');
     return { user, copies };
+  }
+  // Enriquecer una fila de copies con los datos de su carta y serie.
+  async _enrichPgCopy(row) {
+    const card = row ? (await this.pool.query('SELECT * FROM cards WHERE id=$1', [row.card_id])).rows[0] || null : null;
+    const series = card ? (await this.pool.query('SELECT * FROM series WHERE id=$1', [card.series_id])).rows[0] || null : null;
+    return { ...row, card_name: card?.name || '', series_name: series?.name || '', team_or_group: card?.team_or_group || '', rarity: card?.rarity || '', image_url: card?.image_url || '', serie: `${row.serial_n}/${row.serial_m}` };
   }
   async claim({ drop_id, phone, display_name }) {
     const client = await this.pool.connect();
@@ -427,6 +499,57 @@ class PgStore extends BaseStore {
       const card = (await this.pool.query('SELECT * FROM cards WHERE id=$1', [copy.card_id])).rows[0] || null;
       const series = card ? (await this.pool.query('SELECT * FROM series WHERE id=$1', [card.series_id])).rows[0] || null : null;
       return { copy: { ...row, card_name: card?.name || '', series_name: series?.name || '', team_or_group: card?.team_or_group || '', rarity: card?.rarity || '', image_url: card?.image_url || '', serie: `${row.serial_n}/${row.serial_m}` }, card };
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      if (e.status) throw e;
+      throw e;
+    } finally { client.release(); }
+  }
+  async scrap({ copy_id, phone }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const cr = await client.query('SELECT * FROM copies WHERE id=$1 FOR UPDATE', [copy_id]);
+      const copy = cr.rows[0];
+      if (!copy) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+      if (copy.user_phone !== phone) { const e = new Error('Esa carta no es tuya.'); e.status = 409; throw e; }
+      if (copy.status === 'scrapped') { const e = new Error('Esa carta ya fue desechada.'); e.status = 409; throw e; }
+      const upd = await client.query(`UPDATE copies SET status='scrapped' WHERE id=$1 RETURNING *`, [copy_id]);
+      await client.query(`INSERT INTO transactions(id, type, copy_id, from_phone, to_phone) VALUES($1,'scrap',$2,$3,'')`, [uid(), copy_id, phone]);
+      await client.query('COMMIT');
+      const card = (await this.pool.query('SELECT * FROM cards WHERE id=$1', [copy.card_id])).rows[0] || null;
+      return { copy: await this._enrichPgCopy(upd.rows[0]), card };
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      if (e.status) throw e;
+      throw e;
+    } finally { client.release(); }
+  }
+  async trade({ copy_id_a, phone_a, copy_id_b, phone_b, to_display_name_a, to_display_name_b }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Bloquear en orden fijo de id para que dos trades cruzados no se atoren.
+      const [firstId, secondId] = [copy_id_a, copy_id_b].sort();
+      const locked = new Map();
+      for (const id of [firstId, secondId]) {
+        const r = await client.query('SELECT * FROM copies WHERE id=$1 FOR UPDATE', [id]);
+        if (r.rows[0]) locked.set(id, r.rows[0]);
+      }
+      const a = locked.get(copy_id_a), b = locked.get(copy_id_b);
+      if (!a || !b) { const e = new Error('Una de las copias no existe.'); e.status = 404; throw e; }
+      if (a.user_phone !== phone_a || b.user_phone !== phone_b) { const e = new Error('Una de las cartas no es de quien dice ser.'); e.status = 409; throw e; }
+      if (a.status === 'scrapped' || b.status === 'scrapped') { const e = new Error('Una de las cartas fue desechada.'); e.status = 409; throw e; }
+      await client.query('INSERT INTO users(phone, display_name) VALUES($1,$2) ON CONFLICT (phone) DO NOTHING', [phone_a, to_display_name_a || '']);
+      await client.query('INSERT INTO users(phone, display_name) VALUES($1,$2) ON CONFLICT (phone) DO NOTHING', [phone_b, to_display_name_b || '']);
+      const updA = await client.query(`UPDATE copies SET user_phone=$2, status='traded' WHERE id=$1 RETURNING *`, [copy_id_a, phone_b]);
+      const updB = await client.query(`UPDATE copies SET user_phone=$2, status='traded' WHERE id=$1 RETURNING *`, [copy_id_b, phone_a]);
+      await client.query(`INSERT INTO transactions(id, type, copy_id, from_phone, to_phone) VALUES($1,'trade',$2,$3,$4)`, [uid(), copy_id_a, phone_a, phone_b]);
+      await client.query(`INSERT INTO transactions(id, type, copy_id, from_phone, to_phone) VALUES($1,'trade',$2,$3,$4)`, [uid(), copy_id_b, phone_b, phone_a]);
+      await client.query('COMMIT');
+      const cardA = (await this.pool.query('SELECT * FROM cards WHERE id=$1', [a.card_id])).rows[0] || null;
+      const cardB = (await this.pool.query('SELECT * FROM cards WHERE id=$1', [b.card_id])).rows[0] || null;
+      return { copy_a: await this._enrichPgCopy(updA.rows[0]), copy_b: await this._enrichPgCopy(updB.rows[0]), card_a: cardA, card_b: cardB };
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       if (e.status) throw e;
