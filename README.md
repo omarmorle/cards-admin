@@ -29,6 +29,83 @@ El número se reserva en el `!roll`, no en el `!claim`, para que dos
 rolls seguidos no repitan el mismo número. Si ya no quedan números
 libres, esa carta está agotada y no sale.
 
+## Código único de cada copia
+
+Cada copia tiene un **código único** en todo el juego, corto y legible,
+que se forma pegando cuatro partes **sin separadores ni ceros**:
+
+```
+{series_code: 3 letras}{card_code: 3 letras}{global_n}{serial_n}
+```
+
+- `series_code` — código de la serie, **exactamente 3 letras** (ej.
+  `LMX` = Liga MX, `PRU` = Pruebas).
+- `card_code` — código de la carta, **exactamente 3 letras** (ej. `VEG` =
+  Alexis Vega, `MUS` = Muse).
+- `global_n` — el **consecutivo global**: cada copia emitida en TODO el
+  juego lleva el siguiente número (1, 2, 3…), sin importar la serie.
+  Nunca se reutiliza: si el drop vence o la copia se desecha, ese número
+  queda quemado (con hueco). Se reserva en el `!roll` y el `!claim` lo
+  copia del drop a la copia.
+- `serial_n` — el `n` de la Serie n/m de esa carta.
+
+Ejemplos:
+
+| Carta | Serie | Global | Código |
+|---|---|---|---|
+| Alexis Vega | 3/10 | 42 | `LMXVEG423` |
+| Muse | 1/25 | 1 | `PRUMUS11` |
+| Sergio Canales | 11/20 | 7 | `LMXCAN711` |
+
+El código **se guarda en la base** (`copies.code` y `drops.code`) al
+crear el registro. No lleva índice UNIQUE: sin separadores ni ceros dos
+copias distintas podrían en teoría producir el mismo string corto (ej.
+global 42/n 3 vs global 4/n 23); la identidad verdadera sigue siendo el
+`global_n` (único, secuencia que nunca reutiliza) más el índice único
+`(card_id, serial_n)`. El código es la forma corta de mostrarla y
+buscarla: al buscar por código, si hubiera más de una coincidencia se
+queda la de mayor `serial_n` (mismo desempate que al buscar por nombre).
+
+**Códigos de serie y carta:** cada serie tiene su `code` (único en todo
+el juego) y cada carta su `code` (único dentro de su serie). Al crear o
+actualizar, el código debe tener **exactamente 3 letras (A-Z)**; si se
+deja vacío, se genera solo:
+
+- Serie: iniciales de las palabras; las siglas en mayúsculas aportan
+  todas sus letras; si es una sola palabra, sus 3 primeras letras; si
+  faltan letras se rellena con X; se trunca a 3 (ej. "Liga MX" → `LMX`,
+  "Pruebas" → `PRU`, "Luchadores de México" → `LDM`).
+- Carta: primeras 3 letras de la última palabra del nombre en mayúsculas
+  sin acentos; si la palabra tiene menos de 3 letras se rellena con X
+  (ej. "Alexis Vega" → `VEG`, "Omar Moreno" → `MOR`, "Muse" → `MUS`,
+  "Henry Martín" → `MAR`).
+- Si se escribe un código, se normaliza a mayúsculas sin acentos ni
+  espacios (ej. `lmx` → `LMX`). Si no tiene 3 letras o tiene números,
+  la API devuelve error 400. Si se intenta repetir un código (misma
+  serie, o misma serie para una carta), la API también devuelve 400.
+
+**Backfill para series/cartas que ya existen sin código** (las filas
+viejas quedan con `code` NULL y el código de la copia se calcula igual
+con fallback desde el nombre, así que nada se rompe; pero conviene
+rellenarlos). En la consola de `postgres_evo` (o en el panel, editando
+cada serie/carta y guardando):
+
+```sql
+UPDATE series SET code='LMX' WHERE slug='liga-mx-apertura-2026' AND code IS NULL;
+UPDATE series SET code='PRU' WHERE name='Pruebas' AND code IS NULL;
+UPDATE cards SET code='VEG' WHERE name='Alexis Vega' AND code IS NULL;
+UPDATE cards SET code='CAN' WHERE name='Sergio Canales' AND code IS NULL;
+UPDATE cards SET code='MOR' WHERE name='Omar Moreno' AND code IS NULL;
+UPDATE cards SET code='MUS' WHERE name='Muse' AND code IS NULL;
+```
+
+**Dónde se ve el código:** en el texto del `!roll` y del `!claim`, en
+las respuestas de `!gift`, `!trade` y `!scrap`, en el `!inv`, en la
+tabla de Copias del panel y en el inventario de cada usuario. La API
+también lo devuelve: `POST /api/public/roll` trae `code` y `global_n`,
+y las copias enriquecidas (`claim`, `gift`, `scrap`, `trade`,
+`inventory`, lista de Copias) traen el campo `code`.
+
 ## Rareza y sorteo
 
 Pesos base del sorteo (se renormalizan entre las rarezas que sí tengan
@@ -152,12 +229,13 @@ destino, sube el `.csv`, revisa la **vista previa** y confirma.
 Formato (primera fila = encabezados):
 
 ```csv
-name,team_or_group,position_or_role,rarity,max_copies,image_url,value
-Henry Martín,América,Delantero,Épico,25,,100
-Luis Malagón,América,Portero,Común,500,,10
+name,code,team_or_group,position_or_role,rarity,max_copies,image_url,value
+Henry Martín,MAR,América,Delantero,Épico,25,,100
+Luis Malagón,MAL,América,Portero,Común,500,,10
 ```
 
-- Columnas: `name` (obligatoria), `team_or_group`,
+- Columnas: `name` (obligatoria), `code` (opcional: si se deja vacía,
+  el código se genera solo), `team_or_group`,
   `position_or_role`, `rarity`, `max_copies`, `image_url`, `value`.
 - `rarity` debe ser `Común`, `Raro`, `Épico` o `Legendario`
   (si se deja vacía, queda `Común`). `max_copies` debe ser mayor que 0.
@@ -198,10 +276,11 @@ Todas las rutas `/api/public/*` llevan la cabecera `x-api-key: <API_KEY>`.
 Ver el detalle y los nodos en `n8n/roll-claim-notes.md`. Resumen:
 
 - `POST /api/public/roll` `{series_id?, group_jid, rolled_by_phone}` →
-  devuelve `drop_id`, la carta, `serie: "n/m"` y el texto listo para
-  mandar al grupo.
+  devuelve `drop_id`, la carta, `serie: "n/m"`, el `code` de la copia
+  (ej. `LMXVEG423`), su `global_n` y el texto listo para mandar al grupo.
 - `POST /api/public/claim` `{drop_id, phone, display_name}` → el primer
-  claim gana; el segundo recibe error 409.
+  claim gana; el segundo recibe error 409. La copia devuelta trae su
+  `code`.
 - `POST /api/public/gift` `{copy_id, from_phone, to_phone, to_display_name?}` →
   regala una copia a otro usuario. Valida: campos faltantes → 400, regalo
   a uno mismo → 400, copia inexistente → 404, la copia no es de
@@ -220,8 +299,8 @@ Ver el detalle y los nodos en `n8n/roll-claim-notes.md`. Resumen:
   inexistente → 404, dueño equivocado → 409, copia desechada → 409. Ambas
   copias quedan con `status: 'traded'` y se registran dos transacciones
   `trade` (una por copia). Devuelve `{ copy_a, copy_b, card_a, card_b }`.
-- `GET /api/public/inventory?phone=...` → copias de ese usuario con su Serie n/m.
-- `GET /api/public/series` y `GET /api/public/cards?series_id=&rarity=` → catálogo.
+- `GET /api/public/inventory?phone=...` → copias de ese usuario con su Serie n/m y su `code`.
+- `GET /api/public/series` y `GET /api/public/cards?series_id=&rarity=` → catálogo (series y cartas traen su `code`).
 
 ### Qué significa `copies.status`
 

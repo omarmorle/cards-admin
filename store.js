@@ -20,8 +20,69 @@ function slugify(s) {
   return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || uid().slice(0, 8);
 }
-function rollText(card, n, m) {
-  return `🎴 ¡Te salió! ${card.name} - ${card.team_or_group} | Rareza: ${card.rarity} | Serie: ${n}/${m} — escribe !claim para reclamarla`;
+// ---- códigos cortos (serie/carta/copia) ----
+// El código de una copia es la concatenación, sin separadores ni ceros:
+//   {series_code:3 letras}{card_code:3 letras}{global_n}{serial_n}
+//   ej. LMXVEG423, PRUMUS11, LMXCAN711
+// El global_n es un consecutivo de TODAS las series: cada copia emitida
+// en todo el juego lleva el siguiente número global (1, 2, 3...), nunca
+// se reutiliza, ni aunque la copia se deseche o el drop venza.
+// El código SE GUARDA en la BD (copies.code y drops.code) al crear el
+// registro. No lleva UNIQUE: sin separadores ni ceros dos copias
+// distintas podrían en teoría producir el mismo string corto (ej. global
+// 42/n 3 vs global 4/n 23); la identidad verdadera sigue siendo
+// global_n (único) + el índice único (card_id, serial_n). El código es
+// la forma corta de mostrarla y buscarla; al buscar por código, si hay
+// más de una coincidencia se queda la de mayor serial_n.
+function stripAccents(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+function normalizeCode(s) {
+  return stripAccents(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+// Valida que un código tenga EXACTAMENTE 3 letras A-Z. Vacío → null
+// (el llamador genera uno automático). Cualquier otra cosa → error 400.
+function resolveCode(given, generated, label) {
+  if (given === undefined || String(given).trim() === '') return generated;
+  const code = normalizeCode(given);
+  if (!/^[A-Z]{3}$/.test(code)) {
+    const e = new Error(`El código ${label} debe tener exactamente 3 letras (A-Z).`);
+    e.status = 400; throw e;
+  }
+  return code;
+}
+// Serie: iniciales de las palabras; las siglas en mayúsculas aportan
+// todas sus letras; si es una sola palabra, sus 3 primeras letras; si
+// faltan letras se rellena con X; se trunca a 3.
+// "Liga MX" → LMX, "Pruebas" → PRU, "Luchadores de México" → LDM.
+function genSeriesCode(name) {
+  const words = stripAccents(name).split(/[^A-Za-z0-9]+/).filter(w => w && !/^\d+$/.test(w));
+  if (!words.length) return 'XXX';
+  if (words.length === 1) return (words[0].toUpperCase() + 'XX').slice(0, 3);
+  let code = '';
+  for (const w of words) {
+    if (/^[A-Z]+$/.test(w) && w.length <= 3) code += w.toUpperCase();
+    else code += w[0].toUpperCase();
+    if (code.length >= 3) break;
+  }
+  return (code + 'XXX').slice(0, 3);
+}
+// Carta: primeras 3 letras de la última palabra del nombre; si la
+// palabra tiene menos de 3 letras, se rellena con X.
+// "Alexis Vega" → VEG, "Omar Moreno" → MOR, "Muse" → MUS.
+function genCardCode(name) {
+  const words = stripAccents(name).split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const last = words[words.length - 1] || 'CAR';
+  return (last.toUpperCase() + 'XX').slice(0, 3);
+}
+function buildCopyCode(seriesCode, cardCode, globalN, serialN) {
+  return `${seriesCode || ''}${cardCode || ''}${globalN}${serialN}`;
+}
+// Series/cartas viejas pueden tener code NULL: se deriva del nombre.
+function fallbackSeriesCode(series) { return (series && series.code) || genSeriesCode((series && series.name) || ''); }
+function fallbackCardCode(card) { return (card && card.code) || genCardCode((card && card.name) || ''); }
+function rollText(card, n, m, code) {
+  return `🎴 ¡Te salió! ${card.name} - ${card.team_or_group} | Rareza: ${card.rarity} | Serie: ${n}/${m} | Código: ${code} — escribe !claim para reclamarla`;
 }
 function pickWeighted(raritiesPresent) {
   // Renormaliza los pesos base sobre las rarezas que sí tienen cartas disponibles.
@@ -56,6 +117,10 @@ class BaseStore {
   // Seriales ocupados de una carta: copias existentes + drops pendientes
   // no vencidos. Los drops vencidos ya liberaron su serial (expireDrops).
   async usedSerials(cardId) { throw new Error('not implemented'); }
+  // Reserva el siguiente número del consecutivo global (1, 2, 3... en
+  // todo el juego). Nunca se reutiliza: si el drop vence, ese número
+  // queda quemado (con hueco).
+  async _reserveGlobal() { throw new Error('not implemented'); }
   async roll({ series_id, group_jid, rolled_by_phone }) {
     await this.expireDrops();
     const cards = await this.listCards({ series_id, activeOnly: true });
@@ -83,15 +148,20 @@ class BaseStore {
       e.status = 409; throw e;
     }
     const n = free[Math.floor(Math.random() * free.length)];
+    // El global_n se reserva DESPUÉS de saber que hay serial libre,
+    // para no quemar un número en un roll que va a fallar.
+    const globalN = await this._reserveGlobal();
+    const series = await this.getSeries(card.series_id);
+    const code = buildCopyCode(fallbackSeriesCode(series), fallbackCardCode(card), globalN, n);
     const now = new Date();
     const drop = {
-      id: uid(), card_id: card.id, serial_n: n, serial_m: card.max_copies,
+      id: uid(), card_id: card.id, serial_n: n, serial_m: card.max_copies, global_n: globalN, code,
       group_jid: group_jid || '', rolled_by_phone: rolled_by_phone || '',
       status: 'pending', created_at: now.toISOString(),
       expires_at: new Date(now.getTime() + DROP_TTL_MS).toISOString(),
     };
     await this._saveDrop(drop);
-    return { drop, card, text: rollText(card, n, card.max_copies) };
+    return { drop, card, text: rollText(card, n, card.max_copies, code), code, global_n: globalN };
   }
 }
 
@@ -106,10 +176,16 @@ class JsonStore extends BaseStore {
     fs.mkdirSync(path.join(dataDir, 'uploads'), { recursive: true });
     this.data = fs.existsSync(this.file)
       ? JSON.parse(fs.readFileSync(this.file, 'utf8'))
-      : { series: [], cards: [], users: [], copies: [], drops: [], transactions: [] };
+      : { series: [], cards: [], users: [], copies: [], drops: [], transactions: [], next_global_n: 1 };
+    if (this.data.next_global_n === undefined) this.data.next_global_n = 1;
   }
   _save() { fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2)); }
   async init() { /* nada que crear */ }
+  async _reserveGlobal() {
+    const n = this.data.next_global_n || 1;
+    this.data.next_global_n = n + 1;
+    return n;
+  }
   async expireDrops() {
     const now = new Date();
     let changed = false;
@@ -142,12 +218,19 @@ class JsonStore extends BaseStore {
   async listSeries() { return [...this.data.series].sort((a, b) => a.name.localeCompare(b.name)); }
   async getSeries(id) { return this.data.series.find(s => s.id === id) || null; }
   async createSeries(d) {
-    const s = { id: uid(), name: d.name, slug: d.slug || slugify(d.name), description: d.description || '', active: d.active !== false, created_at: new Date().toISOString() };
+    const code = resolveCode(d.code, genSeriesCode(d.name), 'de la serie');
+    if (this.data.series.some(x => (x.code || '') === code)) { const e = new Error('Ya existe una serie con ese código.'); e.status = 400; throw e; }
+    const s = { id: uid(), name: d.name, slug: d.slug || slugify(d.name), code, description: d.description || '', active: d.active !== false, created_at: new Date().toISOString() };
     if (this.data.series.some(x => x.slug === s.slug)) { const e = new Error('Ya existe una serie con ese slug.'); e.status = 400; throw e; }
     this.data.series.push(s); this._save(); return s;
   }
   async updateSeries(id, d) {
     const s = await this.getSeries(id); if (!s) return null;
+    if (d.code !== undefined) {
+      const code = resolveCode(d.code, genSeriesCode(d.name ?? s.name), 'de la serie');
+      if (this.data.series.some(x => x.id !== id && (x.code || '') === code)) { const e = new Error('Ya existe una serie con ese código.'); e.status = 400; throw e; }
+      s.code = code;
+    }
     Object.assign(s, { name: d.name ?? s.name, slug: d.slug ?? s.slug, description: d.description ?? s.description, active: d.active ?? s.active });
     this._save(); return s;
   }
@@ -171,11 +254,19 @@ class JsonStore extends BaseStore {
   async createCard(d) {
     if (!this.data.series.some(s => s.id === d.series_id)) { const e = new Error('La serie no existe.'); e.status = 400; throw e; }
     if (!RARITIES.includes(d.rarity)) { const e = new Error('Rareza inválida. Usa Común, Raro, Épico o Legendario.'); e.status = 400; throw e; }
-    const c = { id: uid(), series_id: d.series_id, name: d.name, team_or_group: d.team_or_group || '', position_or_role: d.position_or_role || '', rarity: d.rarity, max_copies: Math.max(1, parseInt(d.max_copies, 10) || 100), image_url: d.image_url || '', value: parseInt(d.value, 10) || 0, active: d.active !== false, created_at: new Date().toISOString() };
+    const code = resolveCode(d.code, genCardCode(d.name), 'de la carta');
+    if (this.data.cards.some(x => x.series_id === d.series_id && (x.code || '') === code)) { const e = new Error('Ya existe una carta con ese código en esta serie.'); e.status = 400; throw e; }
+    const c = { id: uid(), series_id: d.series_id, name: d.name, code, team_or_group: d.team_or_group || '', position_or_role: d.position_or_role || '', rarity: d.rarity, max_copies: Math.max(1, parseInt(d.max_copies, 10) || 100), image_url: d.image_url || '', value: parseInt(d.value, 10) || 0, active: d.active !== false, created_at: new Date().toISOString() };
     this.data.cards.push(c); this._save(); return c;
   }
   async updateCard(id, d) {
     const c = await this.getCard(id); if (!c) return null;
+    const targetSeries = d.series_id || c.series_id;
+    if (d.code !== undefined) {
+      const code = resolveCode(d.code, genCardCode(d.name ?? c.name), 'de la carta');
+      if (this.data.cards.some(x => x.id !== id && x.series_id === targetSeries && (x.code || '') === code)) { const e = new Error('Ya existe una carta con ese código en esta serie.'); e.status = 400; throw e; }
+      c.code = code;
+    }
     Object.assign(c, { name: d.name ?? c.name, team_or_group: d.team_or_group ?? c.team_or_group, position_or_role: d.position_or_role ?? c.position_or_role, rarity: d.rarity ?? c.rarity, max_copies: d.max_copies ? Math.max(1, parseInt(d.max_copies, 10)) : c.max_copies, image_url: d.image_url ?? c.image_url, value: d.value !== undefined ? parseInt(d.value, 10) || 0 : c.value, active: d.active ?? c.active });
     if (d.series_id) c.series_id = d.series_id;
     this._save(); return c;
@@ -189,14 +280,19 @@ class JsonStore extends BaseStore {
   _enrichCopy(cp) {
     const card = this.data.cards.find(c => c.id === cp.card_id) || {};
     const series = this.data.series.find(s => s.id === card.series_id) || {};
-    return { ...cp, card_name: card.name || '', series_name: series.name || '', series_id: card.series_id || '', team_or_group: card.team_or_group || '', rarity: card.rarity || '', image_url: card.image_url || '', serie: `${cp.serial_n}/${cp.serial_m}` };
+    // El código se guarda en la copia al reclamarla; si falta (copia
+    // vieja), se calcula igual con fallback desde los nombres.
+    const code = cp.code || (cp.global_n != null
+      ? buildCopyCode(fallbackSeriesCode(series), fallbackCardCode(card), cp.global_n, cp.serial_n)
+      : '');
+    return { ...cp, card_name: card.name || '', series_name: series.name || '', series_id: card.series_id || '', team_or_group: card.team_or_group || '', rarity: card.rarity || '', image_url: card.image_url || '', serie: `${cp.serial_n}/${cp.serial_m}`, code };
   }
   async listCopies({ series_id, card_id, user_phone, search, limit = 200, page } = {}) {
     let out = this.data.copies.map(c => this._enrichCopy(c));
     if (card_id) out = out.filter(c => c.card_id === card_id);
     if (series_id) out = out.filter(c => c.series_id === series_id);
     if (user_phone) out = out.filter(c => c.user_phone === user_phone);
-    if (search) { const q = search.toLowerCase(); out = out.filter(c => (c.card_name + ' ' + c.user_phone + ' ' + c.series_name).toLowerCase().includes(q)); }
+    if (search) { const q = search.toLowerCase(); out = out.filter(c => (c.card_name + ' ' + c.code + ' ' + c.user_phone + ' ' + c.series_name).toLowerCase().includes(q)); }
     out.sort((a, b) => new Date(b.claimed_at) - new Date(a.claimed_at));
     if (page !== undefined) return paginateArray(out, { page, limit });
     return out.slice(0, limit);
@@ -231,7 +327,12 @@ class JsonStore extends BaseStore {
     if (!this.data.users.some(u => u.phone === phone)) {
       this.data.users.push({ phone, display_name: display_name || '', created_at: new Date().toISOString() });
     }
-    const copy = { id: uid(), card_id: card.id, user_phone: phone, serial_n: drop.serial_n, serial_m: drop.serial_m, status: 'owned', claimed_at: new Date().toISOString() };
+    // El global_n se copia del drop que lo reservó. Un drop viejo sin
+    // global_n (de antes de este cambio) reserva uno nuevo aquí.
+    const globalN = drop.global_n ?? await this._reserveGlobal();
+    // El código se copia del drop (ya venía calculado en el roll).
+    const code = drop.code || buildCopyCode(fallbackSeriesCode(await this.getSeries(card.series_id)), fallbackCardCode(card), globalN, drop.serial_n);
+    const copy = { id: uid(), card_id: card.id, user_phone: phone, serial_n: drop.serial_n, serial_m: drop.serial_m, global_n: globalN, code, status: 'owned', claimed_at: new Date().toISOString() };
     this.data.copies.push(copy);
     drop.status = 'claimed';
     this.data.transactions.push({ id: uid(), type: 'claim', copy_id: copy.id, from_phone: '', to_phone: phone, created_at: new Date().toISOString() });
@@ -329,11 +430,15 @@ class PgStore extends BaseStore {
       [cardId]);
     return new Set(rows.rows.map(r => r.serial_n));
   }
+  async _reserveGlobal() {
+    const r = await this.pool.query(`SELECT nextval('copies_global_seq') AS n`);
+    return r.rows[0].n;
+  }
   async _saveDrop(drop) {
     await this.pool.query(
-      `INSERT INTO drops(id, card_id, serial_n, serial_m, group_jid, rolled_by_phone, status, created_at, expires_at)
-       VALUES($1,$2,$3,$4,$5,$6,'pending',$7,$8)`,
-      [drop.id, drop.card_id, drop.serial_n, drop.serial_m, drop.group_jid, drop.rolled_by_phone, drop.created_at, drop.expires_at]);
+      `INSERT INTO drops(id, card_id, serial_n, serial_m, global_n, code, group_jid, rolled_by_phone, status, created_at, expires_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$10)`,
+      [drop.id, drop.card_id, drop.serial_n, drop.serial_m, drop.global_n, drop.code || null, drop.group_jid, drop.rolled_by_phone, drop.created_at, drop.expires_at]);
   }
   async stats() {
     const q = async (sql) => (await this.pool.query(sql)).rows[0].n;
@@ -348,18 +453,22 @@ class PgStore extends BaseStore {
   async listSeries() { return (await this.pool.query('SELECT * FROM series ORDER BY name')).rows; }
   async getSeries(id) { return (await this.pool.query('SELECT * FROM series WHERE id=$1', [id])).rows[0] || null; }
   async createSeries(d) {
-    const s = { id: uid(), name: d.name, slug: d.slug || slugify(d.name), description: d.description || '', active: d.active !== false };
+    const code = resolveCode(d.code, genSeriesCode(d.name), 'de la serie');
+    const s = { id: uid(), name: d.name, slug: d.slug || slugify(d.name), code, description: d.description || '', active: d.active !== false };
     try {
-      const r = await this.pool.query('INSERT INTO series(id,name,slug,description,active) VALUES($1,$2,$3,$4,$5) RETURNING *', [s.id, s.name, s.slug, s.description, s.active]);
+      const r = await this.pool.query('INSERT INTO series(id,name,slug,code,description,active) VALUES($1,$2,$3,$4,$5,$6) RETURNING *', [s.id, s.name, s.slug, s.code, s.description, s.active]);
       return r.rows[0];
-    } catch (e) { if (e.code === '23505') { const err = new Error('Ya existe una serie con ese slug.'); err.status = 400; throw err; } throw e; }
+    } catch (e) { if (e.code === '23505') { const err = new Error('Ya existe una serie con ese slug o código.'); err.status = 400; throw err; } throw e; }
   }
   async updateSeries(id, d) {
     const cur = await this.getSeries(id); if (!cur) return null;
-    const r = await this.pool.query(
-      'UPDATE series SET name=$2, slug=$3, description=$4, active=$5 WHERE id=$1 RETURNING *',
-      [id, d.name ?? cur.name, d.slug ?? cur.slug, d.description ?? cur.description, d.active ?? cur.active]);
-    return r.rows[0];
+    const code = d.code !== undefined ? resolveCode(d.code, genSeriesCode(d.name ?? cur.name), 'de la serie') : cur.code;
+    try {
+      const r = await this.pool.query(
+        'UPDATE series SET name=$2, slug=$3, code=$4, description=$5, active=$6 WHERE id=$1 RETURNING *',
+        [id, d.name ?? cur.name, d.slug ?? cur.slug, code, d.description ?? cur.description, d.active ?? cur.active]);
+      return r.rows[0];
+    } catch (e) { if (e.code === '23505') { const err = new Error('Ya existe una serie con ese slug o código.'); err.status = 400; throw err; } throw e; }
   }
   async deleteSeries(id) { await this.pool.query('DELETE FROM series WHERE id=$1', [id]); return true; }
   async listCards({ series_id, rarity, activeOnly, page, limit } = {}) {
@@ -381,25 +490,36 @@ class PgStore extends BaseStore {
   async getCard(id) { return (await this.pool.query('SELECT * FROM cards WHERE id=$1', [id])).rows[0] || null; }
   async createCard(d) {
     if (!RARITIES.includes(d.rarity)) { const e = new Error('Rareza inválida. Usa Común, Raro, Épico o Legendario.'); e.status = 400; throw e; }
-    const c = { id: uid(), series_id: d.series_id, name: d.name, team_or_group: d.team_or_group || '', position_or_role: d.position_or_role || '', rarity: d.rarity, max_copies: Math.max(1, parseInt(d.max_copies, 10) || 100), image_url: d.image_url || '', value: parseInt(d.value, 10) || 0, active: d.active !== false };
+    const code = resolveCode(d.code, genCardCode(d.name), 'de la carta');
+    const c = { id: uid(), series_id: d.series_id, name: d.name, code, team_or_group: d.team_or_group || '', position_or_role: d.position_or_role || '', rarity: d.rarity, max_copies: Math.max(1, parseInt(d.max_copies, 10) || 100), image_url: d.image_url || '', value: parseInt(d.value, 10) || 0, active: d.active !== false };
     try {
       const r = await this.pool.query(
-        `INSERT INTO cards(id,series_id,name,team_or_group,position_or_role,rarity,max_copies,image_url,value,active)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-        [c.id, c.series_id, c.name, c.team_or_group, c.position_or_role, c.rarity, c.max_copies, c.image_url, c.value, c.active]);
+        `INSERT INTO cards(id,series_id,name,code,team_or_group,position_or_role,rarity,max_copies,image_url,value,active)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+        [c.id, c.series_id, c.name, c.code, c.team_or_group, c.position_or_role, c.rarity, c.max_copies, c.image_url, c.value, c.active]);
       return r.rows[0];
-    } catch (e) { if (e.code === '23503') { const err = new Error('La serie no existe.'); err.status = 400; throw err; } throw e; }
+    } catch (e) {
+      if (e.code === '23503') { const err = new Error('La serie no existe.'); err.status = 400; throw err; }
+      if (e.code === '23505') { const err = new Error('Ya existe una carta con ese código en esta serie.'); err.status = 400; throw err; }
+      throw e;
+    }
   }
   async updateCard(id, d) {
     const cur = await this.getCard(id); if (!cur) return null;
-    const r = await this.pool.query(
-      `UPDATE cards SET series_id=$2, name=$3, team_or_group=$4, position_or_role=$5, rarity=$6,
-       max_copies=$7, image_url=$8, value=$9, active=$10 WHERE id=$1 RETURNING *`,
-      [id, d.series_id ?? cur.series_id, d.name ?? cur.name, d.team_or_group ?? cur.team_or_group,
-       d.position_or_role ?? cur.position_or_role, d.rarity ?? cur.rarity,
-       d.max_copies ? Math.max(1, parseInt(d.max_copies, 10)) : cur.max_copies,
-       d.image_url ?? cur.image_url, d.value !== undefined ? parseInt(d.value, 10) || 0 : cur.value, d.active ?? cur.active]);
-    return r.rows[0];
+    const code = d.code !== undefined ? resolveCode(d.code, genCardCode(d.name ?? cur.name), 'de la carta') : cur.code;
+    try {
+      const r = await this.pool.query(
+        `UPDATE cards SET series_id=$2, name=$3, code=$4, team_or_group=$5, position_or_role=$6, rarity=$7,
+         max_copies=$8, image_url=$9, value=$10, active=$11 WHERE id=$1 RETURNING *`,
+        [id, d.series_id ?? cur.series_id, d.name ?? cur.name, code, d.team_or_group ?? cur.team_or_group,
+         d.position_or_role ?? cur.position_or_role, d.rarity ?? cur.rarity,
+         d.max_copies ? Math.max(1, parseInt(d.max_copies, 10)) : cur.max_copies,
+         d.image_url ?? cur.image_url, d.value !== undefined ? parseInt(d.value, 10) || 0 : cur.value, d.active ?? cur.active]);
+      return r.rows[0];
+    } catch (e) {
+      if (e.code === '23505') { const err = new Error('Ya existe una carta con ese código en esta serie.'); err.status = 400; throw err; }
+      throw e;
+    }
   }
   async deleteCard(id) { await this.pool.query('DELETE FROM cards WHERE id=$1', [id]); return true; }
   async listCopies({ series_id, card_id, user_phone, search, limit = 200, page } = {}) {
@@ -407,14 +527,22 @@ class PgStore extends BaseStore {
     if (card_id) { params.push(card_id); where.push(`cp.card_id=$${params.length}`); }
     if (series_id) { params.push(series_id); where.push(`c.series_id=$${params.length}`); }
     if (user_phone) { params.push(user_phone); where.push(`cp.user_phone=$${params.length}`); }
-    if (search) { params.push(`%${search}%`); where.push(`(c.name ILIKE $${params.length} OR cp.user_phone ILIKE $${params.length} OR s.name ILIKE $${params.length})`); }
+    if (search) { params.push(`%${search}%`); where.push(`(c.name ILIKE $${params.length} OR cp.code ILIKE $${params.length} OR cp.user_phone ILIKE $${params.length} OR s.name ILIKE $${params.length})`); }
     const clause = where.length ? ' WHERE ' + where.join(' AND ') : '';
-    const base = `SELECT cp.*, c.name AS card_name, c.series_id, c.team_or_group, c.rarity, c.image_url, s.name AS series_name,
+    const base = `SELECT cp.*, c.name AS card_name, c.series_id, c.code AS card_code, c.team_or_group, c.rarity, c.image_url, s.name AS series_name, s.code AS series_code,
                  (cp.serial_n || '/' || cp.serial_m) AS serie
                  FROM copies cp JOIN cards c ON c.id=cp.card_id JOIN series s ON s.id=c.series_id`;
+    const withCode = (rows) => rows.map(r => ({
+      ...r,
+      // El código se guarda en la copia al reclamarla; si falta (copia
+      // vieja), se calcula igual con fallback desde los nombres.
+      code: r.code || (r.global_n != null
+        ? buildCopyCode(fallbackSeriesCode({ code: r.series_code, name: r.series_name }), fallbackCardCode({ code: r.card_code, name: r.card_name }), r.global_n, r.serial_n)
+        : ''),
+    }));
     if (page === undefined) {
       params.push(limit);
-      return (await this.pool.query(base + clause + ` ORDER BY cp.claimed_at DESC LIMIT $${params.length}`, params)).rows;
+      return withCode((await this.pool.query(base + clause + ` ORDER BY cp.claimed_at DESC LIMIT $${params.length}`, params)).rows);
     }
     const p = pageParams({ page, limit });
     const total = (await this.pool.query(
@@ -422,7 +550,7 @@ class PgStore extends BaseStore {
     const rows = (await this.pool.query(
       base + clause + ` ORDER BY cp.claimed_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, p.limit, p.offset])).rows;
-    return pageResult(rows, total, p);
+    return pageResult(withCode(rows), total, p);
   }
   async listUsers({ page, limit } = {}) {
     const sql = `SELECT u.*, (SELECT COUNT(*)::int FROM copies cp WHERE cp.user_phone=u.phone) AS copies FROM users u`;
@@ -446,7 +574,10 @@ class PgStore extends BaseStore {
   async _enrichPgCopy(row) {
     const card = row ? (await this.pool.query('SELECT * FROM cards WHERE id=$1', [row.card_id])).rows[0] || null : null;
     const series = card ? (await this.pool.query('SELECT * FROM series WHERE id=$1', [card.series_id])).rows[0] || null : null;
-    return { ...row, card_name: card?.name || '', series_name: series?.name || '', team_or_group: card?.team_or_group || '', rarity: card?.rarity || '', image_url: card?.image_url || '', serie: `${row.serial_n}/${row.serial_m}` };
+    const code = row && (row.code || (row.global_n != null
+      ? buildCopyCode(fallbackSeriesCode(series), fallbackCardCode(card), row.global_n, row.serial_n)
+      : ''));
+    return { ...row, card_name: card?.name || '', series_name: series?.name || '', team_or_group: card?.team_or_group || '', rarity: card?.rarity || '', image_url: card?.image_url || '', serie: `${row.serial_n}/${row.serial_m}`, code };
   }
   async claim({ drop_id, phone, display_name }) {
     const client = await this.pool.connect();
@@ -463,16 +594,23 @@ class PgStore extends BaseStore {
       const card = (await client.query('SELECT * FROM cards WHERE id=$1', [drop.card_id])).rows[0];
       if (!card) { const e = new Error('La carta del drop ya no existe.'); e.status = 404; throw e; }
       await client.query('INSERT INTO users(phone, display_name) VALUES($1,$2) ON CONFLICT (phone) DO NOTHING', [phone, display_name || '']);
+      // El global_n se copia del drop que lo reservó. Un drop viejo sin
+      // global_n (de antes de este cambio) reserva uno nuevo aquí.
+      const globalN = drop.global_n ?? (await client.query(`SELECT nextval('copies_global_seq') AS n`)).rows[0].n;
+      // El código se copia del drop (ya venía calculado en el roll).
+      const series0 = (await client.query('SELECT * FROM series WHERE id=$1', [card.series_id])).rows[0] || null;
+      const code = drop.code || buildCopyCode(fallbackSeriesCode(series0), fallbackCardCode(card), globalN, drop.serial_n);
       const copyId = uid();
       const cr = await client.query(
-        `INSERT INTO copies(id, card_id, user_phone, serial_n, serial_m, status)
-         VALUES($1,$2,$3,$4,$5,'owned') RETURNING *`,
-        [copyId, card.id, phone, drop.serial_n, drop.serial_m]);
+        `INSERT INTO copies(id, card_id, user_phone, serial_n, serial_m, global_n, code, status)
+         VALUES($1,$2,$3,$4,$5,$6,$7,'owned') RETURNING *`,
+        [copyId, card.id, phone, drop.serial_n, drop.serial_m, globalN, code]);
       await client.query(`UPDATE drops SET status='claimed' WHERE id=$1`, [drop_id]);
       await client.query(`INSERT INTO transactions(id, type, copy_id, from_phone, to_phone) VALUES($1,'claim',$2,'',$3)`, [uid(), copyId, phone]);
       await client.query('COMMIT');
       const copy = cr.rows[0];
-      return { copy: { ...copy, card_name: card.name, series_name: '', team_or_group: card.team_or_group, rarity: card.rarity, image_url: card.image_url, serie: `${copy.serial_n}/${copy.serial_m}` }, card };
+      const series = series0;
+      return { copy: { ...copy, card_name: card.name, series_name: series?.name || '', team_or_group: card.team_or_group, rarity: card.rarity, image_url: card.image_url, serie: `${copy.serial_n}/${copy.serial_m}`, code: copy.code || code }, card };
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       if (e.code === '23505') { const err = new Error('Ese número de serie ya fue asignado.'); err.status = 409; throw err; }
@@ -498,7 +636,8 @@ class PgStore extends BaseStore {
       const row = upd.rows[0];
       const card = (await this.pool.query('SELECT * FROM cards WHERE id=$1', [copy.card_id])).rows[0] || null;
       const series = card ? (await this.pool.query('SELECT * FROM series WHERE id=$1', [card.series_id])).rows[0] || null : null;
-      return { copy: { ...row, card_name: card?.name || '', series_name: series?.name || '', team_or_group: card?.team_or_group || '', rarity: card?.rarity || '', image_url: card?.image_url || '', serie: `${row.serial_n}/${row.serial_m}` }, card };
+      const code = row.code || (row.global_n != null ? buildCopyCode(fallbackSeriesCode(series), fallbackCardCode(card), row.global_n, row.serial_n) : '');
+      return { copy: { ...row, card_name: card?.name || '', series_name: series?.name || '', team_or_group: card?.team_or_group || '', rarity: card?.rarity || '', image_url: card?.image_url || '', serie: `${row.serial_n}/${row.serial_m}`, code }, card };
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       if (e.status) throw e;
@@ -576,4 +715,4 @@ function createStore() {
   return new JsonStore(dataDir);
 }
 
-module.exports = { createStore, RARITIES, BASE_WEIGHTS, DROP_TTL_MS, rollText };
+module.exports = { createStore, RARITIES, BASE_WEIGHTS, DROP_TTL_MS, rollText, buildCopyCode, genSeriesCode, genCardCode, normalizeCode };
