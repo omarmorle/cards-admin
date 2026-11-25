@@ -47,7 +47,7 @@ async function loadAll() {
   $('cardSeriesFilter').innerHTML = '<option value="">Todas</option>' + opts;
 }
 function renderSeries() {
-  $('seriesList').innerHTML = series.map(s => `<div class="item"><div class="grow"><b>${esc(s.name)}</b> <small>/${esc(s.slug)}</small> <span class="pill ${s.active ? 'active' : 'inactive'}">${s.active ? 'activa' : 'inactiva'}</span><br><small>${esc(s.description || '')}</small></div><div class="row"><button onclick="editSeries('${s.id}')" class="secondary">Editar</button><button onclick="delSeries('${s.id}')" class="danger">Borrar</button></div></div>`).join('') || '<p class="muted">No hay series. Crea la primera abajo.</p>';
+  $('seriesList').innerHTML = series.map(s => `<div class="item"><div class="grow"><b>${esc(s.name)}</b> <small>/${esc(s.slug)}</small>${s.code ? ` <span class="pill">${esc(s.code)}</span>` : ''} <span class="pill ${s.active ? 'active' : 'inactive'}">${s.active ? 'activa' : 'inactiva'}</span><br><small>${esc(s.description || '')}</small></div><div class="row"><button onclick="editSeries('${s.id}')" class="secondary">Editar</button><button onclick="delSeries('${s.id}')" class="danger">Borrar</button></div></div>`).join('') || '<p class="muted">No hay series. Crea la primera abajo.</p>';
 }
 async function renderCards(page = 1) {
   cardsPage = page;
@@ -57,7 +57,7 @@ async function renderCards(page = 1) {
   $('cardsList').innerHTML = cards.map(c => {
     const s = series.find(x => x.id === c.series_id);
     const pill = RARITY_CLASS[c.rarity] || 'comun';
-    return `<div class="item">${c.image_url ? `<img src="${esc(c.image_url)}" alt="">` : ''}<div class="grow"><b>${esc(c.name)}</b> <span class="pill ${pill}">${esc(c.rarity)}</span> <span class="pill ${c.active ? 'active' : 'inactive'}">${c.active ? 'activa' : 'inactiva'}</span><br><small>${esc(s ? s.name : '')} · ${esc(c.team_or_group)} · ${esc(c.position_or_role)}</small><br><small>Máx. copias: ${c.max_copies} · Valor: ${c.value}</small></div><div class="row"><button onclick="editCard('${c.id}')" class="secondary">Editar</button><button onclick="delCard('${c.id}')" class="danger">Borrar</button></div></div>`;
+    return `<div class="item">${c.image_url ? `<img src="${esc(c.image_url)}" alt="">` : ''}<div class="grow"><b>${esc(c.name)}</b>${c.code ? ` <small>${esc(c.code)}</small>` : ''} <span class="pill ${pill}">${esc(c.rarity)}</span> <span class="pill ${c.active ? 'active' : 'inactive'}">${c.active ? 'activa' : 'inactiva'}</span><br><small>${esc(s ? s.name : '')} · ${esc(c.team_or_group)} · ${esc(c.position_or_role)}</small><br><small>Máx. copias: ${c.max_copies} · Valor: ${c.value}</small></div><div class="row"><button onclick="editCard('${c.id}')" class="secondary">Editar</button><button onclick="delCard('${c.id}')" class="danger">Borrar</button></div></div>`;
   }).join('') || '<p class="muted">No hay cartas en esta vista.</p>';
   renderPager('cardsPager', data, (p) => renderCards(p));
 }
@@ -65,7 +65,7 @@ async function renderCopies(page = 1) {
   copiesPage = page;
   const q = $('copySearch').value || '';
   const data = asPage(await api('/api/admin/copies?search=' + encodeURIComponent(q) + `&page=${page}&limit=${PAGE_SIZE}`));
-  $('copiesList').innerHTML = data.items.length ? `<div class="table-wrap"><table><tr><th>Carta</th><th>Serie</th><th>Usuario</th><th>Fecha</th></tr>${data.items.map(c => `<tr><td>${esc(c.card_name)} <b>${esc(c.serie)}</b></td><td>${esc(c.series_name)}</td><td>${esc(c.user_phone)}</td><td>${new Date(c.claimed_at).toLocaleString()}</td></tr>`).join('')}</table></div>` : '<p class="muted">Aún no hay copias reclamadas.</p>';
+  $('copiesList').innerHTML = data.items.length ? `<div class="table-wrap"><table><tr><th>Carta</th><th>Código</th><th>Serie</th><th>Usuario</th><th>Fecha</th></tr>${data.items.map(c => `<tr><td>${esc(c.card_name)} <b>${esc(c.serie)}</b></td><td><code>${esc(c.code || '')}</code></td><td>${esc(c.series_name)}</td><td>${esc(c.user_phone)}</td><td>${new Date(c.claimed_at).toLocaleString()}</td></tr>`).join('')}</table></div>` : '<p class="muted">Aún no hay copias reclamadas.</p>';
   renderPager('copiesPager', data, (p) => renderCopies(p));
 }
 async function renderUsers(page = 1) {
@@ -76,11 +76,11 @@ async function renderUsers(page = 1) {
 }
 window.showInv = async (phone) => {
   const inv = await api('/api/admin/users/' + encodeURIComponent(phone) + '/inventory');
-  $('userInv').innerHTML = `<div class="card"><h3>Inventario de ${esc(phone)}</h3>${inv.copies.map(c => `<div>${esc(c.card_name)} <b>${esc(c.serie)}</b> · ${esc(c.rarity)}</div>`).join('') || '<p class="muted">Sin cartas.</p>'}</div>`;
+  $('userInv').innerHTML = `<div class="card"><h3>Inventario de ${esc(phone)}</h3>${inv.copies.map(c => `<div>${esc(c.card_name)} <b>${esc(c.serie)}</b> · ${esc(c.rarity)}${c.code ? ` · <code>${esc(c.code)}</code>` : ''}</div>`).join('') || '<p class="muted">Sin cartas.</p>'}</div>`;
 };
-window.editSeries = (id) => { const s = series.find(x => x.id === id); $('seriesId').value = s.id; $('seriesName').value = s.name; $('seriesSlug').value = s.slug; $('seriesDesc').value = s.description; $('seriesActive').checked = s.active; $('seriesFormTitle').textContent = 'Editar serie'; window.scrollTo(0, document.getElementById('seriesForm').offsetTop); };
+window.editSeries = (id) => { const s = series.find(x => x.id === id); $('seriesId').value = s.id; $('seriesName').value = s.name; $('seriesSlug').value = s.slug; $('seriesCode').value = s.code || ''; $('seriesDesc').value = s.description; $('seriesActive').checked = s.active; $('seriesFormTitle').textContent = 'Editar serie'; window.scrollTo(0, document.getElementById('seriesForm').offsetTop); };
 window.delSeries = async (id) => { if (!confirm('¿Borrar esta serie y todas sus cartas y copias?')) return; await api('/api/admin/series/' + id, { method: 'DELETE' }); await loadAll(); };
-window.editCard = (id) => { const c = cards.find(x => x.id === id); if (!c) return; $('cardId').value = c.id; $('cardSeries').value = c.series_id; $('cardName').value = c.name; $('cardTeam').value = c.team_or_group; $('cardPos').value = c.position_or_role; $('cardRarity').value = c.rarity; $('cardMax').value = c.max_copies; $('cardValue').value = c.value; $('cardImage').value = c.image_url; $('cardActive').checked = c.active; $('cardPreview').innerHTML = c.image_url ? `<img src="${esc(c.image_url)}" class="preview-img">` : ''; $('cardFormTitle').textContent = 'Editar carta'; window.scrollTo(0, document.getElementById('cardForm').offsetTop); };
+window.editCard = (id) => { const c = cards.find(x => x.id === id); if (!c) return; $('cardId').value = c.id; $('cardSeries').value = c.series_id; $('cardName').value = c.name; $('cardCode').value = c.code || ''; $('cardTeam').value = c.team_or_group; $('cardPos').value = c.position_or_role; $('cardRarity').value = c.rarity; $('cardMax').value = c.max_copies; $('cardValue').value = c.value; $('cardImage').value = c.image_url; $('cardActive').checked = c.active; $('cardPreview').innerHTML = c.image_url ? `<img src="${esc(c.image_url)}" class="preview-img">` : ''; $('cardFormTitle').textContent = 'Editar carta'; window.scrollTo(0, document.getElementById('cardForm').offsetTop); };
 window.delCard = async (id) => { if (!confirm('¿Borrar esta carta y sus copias?')) return; await api('/api/admin/cards/' + id, { method: 'DELETE' }); await loadAll(); };
 
 // ---- CSV: parseo en el cliente (sin dependencias) ----
@@ -113,6 +113,7 @@ function csvToCards(rows) {
   const idx = (name) => header.indexOf(name);
   const cards = rows.slice(1).map(r => ({
     name: (r[idx('name')] || '').trim(),
+    code: idx('code') >= 0 ? (r[idx('code')] || '').trim() : '',
     team_or_group: idx('team_or_group') >= 0 ? (r[idx('team_or_group')] || '').trim() : '',
     position_or_role: idx('position_or_role') >= 0 ? (r[idx('position_or_role')] || '').trim() : '',
     rarity: idx('rarity') >= 0 ? (r[idx('rarity')] || '').trim() || 'Común' : 'Común',
@@ -139,7 +140,7 @@ $('csvFile').onchange = async () => {
   $('csvImportBtn').disabled = false;
 };
 $('csvTemplateBtn').onclick = () => {
-  const blob = new Blob(['name,team_or_group,position_or_role,rarity,max_copies,image_url,value\nHenry Martín,América,Delantero,Épico,25,,100\nLuis Malagón,América,Portero,Común,500,,10\n'], { type: 'text/csv' });
+  const blob = new Blob(['name,code,team_or_group,position_or_role,rarity,max_copies,image_url,value\nHenry Martín,MAR,América,Delantero,Épico,25,,100\nLuis Malagón,MAL,América,Portero,Común,500,,10\n'], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = 'plantilla-cartas.csv'; a.click();
   URL.revokeObjectURL(a.href);
@@ -168,7 +169,10 @@ $('loginBtn').onclick = async () => {
   catch (e) { $('loginMsg').textContent = e.message; }
 };
 $('logoutBtn').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
-$('seriesForm').onsubmit = async (e) => { e.preventDefault(); const id = $('seriesId').value; const body = { name: $('seriesName').value, slug: $('seriesSlug').value || undefined, description: $('seriesDesc').value, active: $('seriesActive').checked }; await api(id ? '/api/admin/series/' + id : '/api/admin/series', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); $('seriesForm').reset(); $('seriesId').value = ''; $('seriesActive').checked = true; await loadAll(); msg('Serie guardada.'); };
+// El código debe tener exactamente 3 letras (A-Z); vacío = se genera solo.
+const normCode = (v) => String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const checkCode = (v) => { const c = String(v || '').trim(); return c === '' || /^[A-Z]{3}$/.test(normCode(c)); };
+$('seriesForm').onsubmit = async (e) => { e.preventDefault(); if (!checkCode($('seriesCode').value)) return alert('El código debe tener exactamente 3 letras (A-Z).'); const id = $('seriesId').value; const body = { name: $('seriesName').value, slug: $('seriesSlug').value || undefined, code: $('seriesCode').value || undefined, description: $('seriesDesc').value, active: $('seriesActive').checked }; await api(id ? '/api/admin/series/' + id : '/api/admin/series', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); $('seriesForm').reset(); $('seriesId').value = ''; $('seriesActive').checked = true; await loadAll(); msg('Serie guardada.'); };
 $('seriesCancel').onclick = () => { $('seriesForm').reset(); $('seriesId').value = ''; };
 $('cardSeriesFilter').onchange = () => renderCards(1);
 $('cardUpload').onchange = async () => {
@@ -178,7 +182,7 @@ $('cardUpload').onchange = async () => {
   const data = await r.json(); if (!r.ok) return alert(data.error || 'No se pudo subir');
   $('cardImage').value = data.url; $('cardPreview').innerHTML = `<img src="${esc(data.url)}" class="preview-img">`;
 };
-$('cardForm').onsubmit = async (e) => { e.preventDefault(); const id = $('cardId').value; const body = { series_id: $('cardSeries').value, name: $('cardName').value, team_or_group: $('cardTeam').value, position_or_role: $('cardPos').value, rarity: $('cardRarity').value, max_copies: parseInt($('cardMax').value, 10), value: parseInt($('cardValue').value, 10), image_url: $('cardImage').value, active: $('cardActive').checked }; await api(id ? '/api/admin/cards/' + id : '/api/admin/cards', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); $('cardForm').reset(); $('cardId').value = ''; $('cardActive').checked = true; $('cardPreview').innerHTML = ''; await loadAll(); msg('Carta guardada.'); };
+$('cardForm').onsubmit = async (e) => { e.preventDefault(); if (!checkCode($('cardCode').value)) return alert('El código debe tener exactamente 3 letras (A-Z).'); const id = $('cardId').value; const body = { series_id: $('cardSeries').value, name: $('cardName').value, code: $('cardCode').value || undefined, team_or_group: $('cardTeam').value, position_or_role: $('cardPos').value, rarity: $('cardRarity').value, max_copies: parseInt($('cardMax').value, 10), value: parseInt($('cardValue').value, 10), image_url: $('cardImage').value, active: $('cardActive').checked }; await api(id ? '/api/admin/cards/' + id : '/api/admin/cards', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) }); $('cardForm').reset(); $('cardId').value = ''; $('cardActive').checked = true; $('cardPreview').innerHTML = ''; await loadAll(); msg('Carta guardada.'); };
 $('cardCancel').onclick = () => { $('cardForm').reset(); $('cardId').value = ''; $('cardPreview').innerHTML = ''; };
 $('copySearchBtn').onclick = () => renderCopies(1);
 $('copySearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderCopies(1); });

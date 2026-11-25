@@ -33,6 +33,7 @@
       <div class="form-grid">
         <label>Nombre <input id="seriesName" required placeholder="Ej. Liga MX - Apertura 2026"></label>
         <label>Slug <input id="seriesSlug" placeholder="liga-mx-apertura-2026 (opcional, se genera solo)"></label>
+        <label>Código <input id="seriesCode" placeholder="Ej. LMX · 3 letras (opcional, se genera solo)"></label>
       </div>
       <label>Descripción <input id="seriesDesc" placeholder="¿De qué va esta colección?"></label>
       <label class="inline"><input type="checkbox" id="seriesActive" checked> Activa</label>
@@ -51,6 +52,7 @@
       <div class="form-grid">
         <label>Serie <select id="cardSeries" required></select></label>
         <label>Nombre <input id="cardName" required placeholder="Ej. Henry Martín"></label>
+        <label>Código <input id="cardCode" placeholder="Ej. VEG · 3 letras (opcional, se genera solo)"></label>
         <label>Equipo / grupo <input id="cardTeam" placeholder="Ej. América"></label>
         <label>Posición / rol <input id="cardPos" placeholder="Ej. Delantero"></label>
         <label>Rareza
@@ -67,7 +69,7 @@
     </form>
 
     <h2>Importar cartas desde CSV</h2>
-    <p class="muted">Sube un archivo CSV para crear varias cartas de golpe en una serie. Columnas: <b>name, team_or_group, position_or_role, rarity, max_copies, image_url, value</b>. Primero verás una vista previa y luego confirmas la importación.</p>
+    <p class="muted">Sube un archivo CSV para crear varias cartas de golpe en una serie. Columnas: <b>name, code, team_or_group, position_or_role, rarity, max_copies, image_url, value</b>. La columna <b>code</b> es opcional: si se deja vacía, el código se genera solo. Primero verás una vista previa y luego confirmas la importación.</p>
     <div class="card form">
       <div class="form-grid">
         <label>Serie destino <select id="csvSeries" required></select></label>
