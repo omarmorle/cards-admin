@@ -2,6 +2,12 @@
 -- La app también ejecuta este archivo automáticamente al arrancar
 -- en modo Postgres (si DATABASE_URL está definido).
 -- No contiene credenciales: la conexión viene de DATABASE_URL.
+--
+-- ORDEN IMPORTANTE: el init corre este archivo como una sola consulta,
+-- así que van PRIMERO todas las CREATE TABLE, LUEGO los ALTER y AL FINAL
+-- todos los índices. Un índice que referencia una columna que el ALTER
+-- aún no creó aborta toda la migración (eso pasó en el despliegue del
+-- código único: faltaba global_n al crear idx_copies_global_n).
 
 -- Consecutivo global de copias: cada copia emitida en TODO el juego
 -- lleva el siguiente número (1, 2, 3...), sin importar la serie. Nunca
@@ -35,8 +41,6 @@ CREATE TABLE IF NOT EXISTS cards (
   active          BOOLEAN NOT NULL DEFAULT TRUE,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_cards_series ON cards(series_id);
-CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity);
 
 CREATE TABLE IF NOT EXISTS users (
   phone         TEXT PRIMARY KEY,
@@ -56,17 +60,6 @@ CREATE TABLE IF NOT EXISTS copies (
               CHECK (status IN ('owned','gifted','traded','scrapped')),
   claimed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
--- Una misma carta no puede tener dos copias con el mismo número de serie.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_copies_card_serial
-  ON copies(card_id, serial_n);
--- El consecutivo global tampoco se repite jamás en todo el juego.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_copies_global_n ON copies(global_n);
--- El código se guarda al reclamar (es la forma corta de mostrar y buscar
--- la copia). Sin UNIQUE: la unicidad real la dan global_n y
--- (card_id, serial_n); al buscar por código se desempata por mayor serial_n.
-CREATE INDEX IF NOT EXISTS idx_copies_code ON copies(code);
-CREATE INDEX IF NOT EXISTS idx_copies_user ON copies(user_phone);
-CREATE INDEX IF NOT EXISTS idx_copies_card ON copies(card_id);
 
 CREATE TABLE IF NOT EXISTS drops (
   id              TEXT PRIMARY KEY,
@@ -82,11 +75,18 @@ CREATE TABLE IF NOT EXISTS drops (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at      TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_drops_status ON drops(status);
-CREATE INDEX IF NOT EXISTS idx_drops_group ON drops(group_jid);
-CREATE INDEX IF NOT EXISTS idx_drops_code ON drops(code);
 
--- Migración para bases ya existentes (las tablas de arriba solo se
+CREATE TABLE IF NOT EXISTS transactions (
+  id          TEXT PRIMARY KEY,
+  type        TEXT NOT NULL
+              CHECK (type IN ('claim','gift','trade','scrap')),
+  copy_id     TEXT REFERENCES copies(id) ON DELETE SET NULL,
+  from_phone  TEXT NOT NULL DEFAULT '',
+  to_phone    TEXT NOT NULL DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Migración para bases ya existentes (las CREATE TABLE de arriba solo
 -- crean si no existen, así que los cambios van con ALTER):
 ALTER TABLE series ADD COLUMN IF NOT EXISTS code TEXT;
 ALTER TABLE cards ADD COLUMN IF NOT EXISTS code TEXT;
@@ -94,6 +94,26 @@ ALTER TABLE copies ADD COLUMN IF NOT EXISTS global_n INTEGER;
 ALTER TABLE copies ADD COLUMN IF NOT EXISTS code TEXT;
 ALTER TABLE drops ADD COLUMN IF NOT EXISTS global_n INTEGER;
 ALTER TABLE drops ADD COLUMN IF NOT EXISTS code TEXT;
+
+-- Índices (después de los ALTER, ver el orden importante de arriba).
+CREATE INDEX IF NOT EXISTS idx_cards_series ON cards(series_id);
+CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity);
+-- Una misma carta no puede tener dos copias con el mismo número de serie.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_copies_card_serial
+  ON copies(card_id, serial_n);
+-- El consecutivo global tampoco se repite jamás en todo el juego.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_copies_global_n ON copies(global_n);
+-- El código se guarda al reclamar (es la forma corta de mostrar y buscar
+-- la copia). Sin UNIQUE: la unicidad real la dan global_n y
+-- (card_id, serial_n); al buscar por código se desempata por mayor serial_n.
+CREATE INDEX IF NOT EXISTS idx_copies_code ON copies(code);
+CREATE INDEX IF NOT EXISTS idx_copies_user ON copies(user_phone);
+CREATE INDEX IF NOT EXISTS idx_copies_card ON copies(card_id);
+CREATE INDEX IF NOT EXISTS idx_drops_status ON drops(status);
+CREATE INDEX IF NOT EXISTS idx_drops_group ON drops(group_jid);
+CREATE INDEX IF NOT EXISTS idx_drops_code ON drops(code);
+CREATE INDEX IF NOT EXISTS idx_tx_copy ON transactions(copy_id);
+CREATE INDEX IF NOT EXISTS idx_tx_to ON transactions(to_phone);
 -- Códigos únicos: el de serie en todo el juego, el de carta dentro de
 -- su serie. (Postgres permite varios NULL, así que las filas viejas sin
 -- código no chocan; el backfill de abajo los rellena.)
@@ -111,15 +131,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_series_code ON cards(series_id, code
 --   UPDATE cards SET code='MUS' WHERE name='Muse' AND code IS NULL;
 -- Aunque queden en NULL, el código de la copia se calcula igual con
 -- fallback (se deriva del nombre), así que nada se rompe.
-
-CREATE TABLE IF NOT EXISTS transactions (
-  id          TEXT PRIMARY KEY,
-  type        TEXT NOT NULL
-              CHECK (type IN ('claim','gift','trade','scrap')),
-  copy_id     TEXT REFERENCES copies(id) ON DELETE SET NULL,
-  from_phone  TEXT NOT NULL DEFAULT '',
-  to_phone    TEXT NOT NULL DEFAULT '',
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_tx_copy ON transactions(copy_id);
-CREATE INDEX IF NOT EXISTS idx_tx_to ON transactions(to_phone);
