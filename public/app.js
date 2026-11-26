@@ -65,13 +65,13 @@ async function renderCopies(page = 1) {
   copiesPage = page;
   const q = $('copySearch').value || '';
   const data = asPage(await api('/api/admin/copies?search=' + encodeURIComponent(q) + `&page=${page}&limit=${PAGE_SIZE}`));
-  $('copiesList').innerHTML = data.items.length ? `<div class="table-wrap"><table><tr><th>Carta</th><th>Código</th><th>Serie</th><th>Usuario</th><th>Fecha</th></tr>${data.items.map(c => `<tr><td>${esc(c.card_name)} <b>${esc(c.serie)}</b></td><td><code>${esc(c.code || '')}</code></td><td>${esc(c.series_name)}</td><td>${esc(c.user_phone)}</td><td>${new Date(c.claimed_at).toLocaleString()}</td></tr>`).join('')}</table></div>` : '<p class="muted">Aún no hay copias reclamadas.</p>';
+  $('copiesList').innerHTML = data.items.length ? `<div class="table-wrap"><table><tr><th>Carta</th><th>Código</th><th>Serie</th><th>Usuario</th><th>Fecha</th><th>Acciones</th></tr>${data.items.map(c => `<tr><td>${esc(c.card_name)} <b>${esc(c.serie)}</b></td><td><code>${esc(c.code || '')}</code></td><td>${esc(c.series_name)}</td><td>${esc(c.user_phone)}</td><td>${new Date(c.claimed_at).toLocaleString()}</td><td><div class="row"><button onclick="transferCopy('${c.id}')" class="secondary">Transferir</button><button onclick="delCopy('${c.id}')" class="danger">Eliminar</button></div></td></tr>`).join('')}</table></div>` : '<p class="muted">Aún no hay copias reclamadas.</p>';
   renderPager('copiesPager', data, (p) => renderCopies(p));
 }
 async function renderUsers(page = 1) {
   usersPage = page;
   const data = asPage(await api(`/api/admin/users?page=${page}&limit=${PAGE_SIZE}`));
-  $('usersList').innerHTML = data.items.map(u => `<div class="item"><div class="grow"><b>${esc(u.display_name || u.phone)}</b><br><small>${esc(u.phone)} · ${u.copies} carta(s)</small></div><button onclick="showInv('${esc(u.phone)}')" class="secondary">Ver inventario</button></div>`).join('') || '<p class="muted">Aún no hay usuarios.</p>';
+  $('usersList').innerHTML = data.items.map(u => `<div class="item"><div class="grow"><b>${esc(u.display_name || u.phone)}</b><br><small>${esc(u.phone)} · ${u.copies} carta(s)</small></div><div class="row"><button onclick="renameUser('${esc(u.phone)}')" class="secondary">Renombrar</button><button onclick="showInv('${esc(u.phone)}')" class="secondary">Ver inventario</button></div></div>`).join('') || '<p class="muted">Aún no hay usuarios.</p>';
   renderPager('usersPager', data, (p) => renderUsers(p));
 }
 window.showInv = async (phone) => {
@@ -82,6 +82,25 @@ window.editSeries = (id) => { const s = series.find(x => x.id === id); $('series
 window.delSeries = async (id) => { if (!confirm('¿Borrar esta serie y todas sus cartas y copias?')) return; await api('/api/admin/series/' + id, { method: 'DELETE' }); await loadAll(); };
 window.editCard = (id) => { const c = cards.find(x => x.id === id); if (!c) return; $('cardId').value = c.id; $('cardSeries').value = c.series_id; $('cardName').value = c.name; $('cardCode').value = c.code || ''; $('cardTeam').value = c.team_or_group; $('cardPos').value = c.position_or_role; $('cardRarity').value = c.rarity; $('cardMax').value = c.max_copies; $('cardValue').value = c.value; $('cardImage').value = c.image_url; $('cardActive').checked = c.active; $('cardPreview').innerHTML = c.image_url ? `<img src="${esc(c.image_url)}" class="preview-img">` : ''; $('cardFormTitle').textContent = 'Editar carta'; window.scrollTo(0, document.getElementById('cardForm').offsetTop); };
 window.delCard = async (id) => { if (!confirm('¿Borrar esta carta y sus copias?')) return; await api('/api/admin/cards/' + id, { method: 'DELETE' }); await loadAll(); };
+// ---- manejo de copias y usuarios desde el panel ----
+window.transferCopy = async (id) => {
+  const to = prompt('Teléfono del nuevo dueño (con código de país, ej. 5215500000001):');
+  if (!to || !to.trim()) return;
+  try { await api('/api/admin/copies/' + id + '/transfer', { method: 'POST', body: JSON.stringify({ to_phone: to.trim() }) }); await renderCopies(copiesPage); msg('Copia transferida.'); }
+  catch (e) { alert(e.message); }
+};
+window.delCopy = async (id) => {
+  if (!confirm('¿Borrar esta copia? El historial de transacciones se conserva (sin apuntar a la copia).')) return;
+  try { await api('/api/admin/copies/' + id, { method: 'DELETE' }); await renderCopies(copiesPage); msg('Copia borrada.'); }
+  catch (e) { alert(e.message); }
+};
+window.renameUser = async (phone) => {
+  const name = prompt('Nuevo nombre para ' + phone + ':');
+  if (name === null) return;
+  if (!name.trim()) return alert('El nombre no puede estar vacío.');
+  try { await api('/api/admin/users/' + encodeURIComponent(phone), { method: 'PUT', body: JSON.stringify({ display_name: name.trim() }) }); await renderUsers(usersPage); msg('Usuario renombrado.'); }
+  catch (e) { alert(e.message); }
+};
 
 // ---- CSV: parseo en el cliente (sin dependencias) ----
 function parseCSV(text) {
