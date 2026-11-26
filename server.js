@@ -152,6 +152,23 @@ app.post('/api/admin/import-cards', adminAuth, handle(async (req, res) => {
 app.get('/api/admin/copies', adminAuth, handle(async (req, res) => res.json(await store.listCopies(req.query))));
 app.get('/api/admin/users', adminAuth, handle(async (req, res) => res.json(await store.listUsers(req.query))));
 app.get('/api/admin/users/:phone/inventory', adminAuth, handle(async (req, res) => res.json(await store.getUserInventory(req.params.phone))));
+// Manejo de copias y usuarios desde el panel: transferir una copia a
+// otro usuario (crea el usuario destino si no existe), borrar una copia
+// (el historial de transacciones se conserva con copy_id en NULL) y
+// renombrar un usuario.
+app.post('/api/admin/copies/:id/transfer', adminAuth, handle(async (req, res) => {
+  const { to_phone } = req.body || {};
+  if (!to_phone) return res.status(400).json({ error: 'Falta to_phone (teléfono del nuevo dueño).' });
+  res.json(await store.transferCopy(req.params.id, to_phone));
+}));
+app.delete('/api/admin/copies/:id', adminAuth, handle(async (req, res) => {
+  await store.deleteCopy(req.params.id);
+  res.json({ ok: true });
+}));
+app.put('/api/admin/users/:phone', adminAuth, handle(async (req, res) => {
+  const { display_name } = req.body || {};
+  res.json(await store.renameUser(req.params.phone, display_name));
+}));
 app.post('/api/admin/seed', adminAuth, handle(async (req, res) => {
   const seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'seed.json'), 'utf8'));
   res.json(await store.seedIfEmpty(seed));
@@ -171,7 +188,7 @@ app.get('/api/public/cards', publicAuth, handle(async (req, res) => {
 app.post('/api/public/roll', publicAuth, handle(async (req, res) => {
   const { series_id, group_jid, rolled_by_phone } = req.body || {};
   const out = await store.roll({ series_id, group_jid, rolled_by_phone });
-  res.json({ drop_id: out.drop.id, card: out.card, serie: `${out.drop.serial_n}/${out.drop.serial_m}`, text: out.text, expires_at: out.drop.expires_at });
+  res.json({ drop_id: out.drop.id, card: out.card, serie: `${out.drop.serial_n}/${out.drop.serial_m}`, code: out.code, global_n: out.global_n, text: out.text, expires_at: out.drop.expires_at });
 }));
 app.post('/api/public/claim', publicAuth, handle(async (req, res) => {
   const { drop_id, phone, display_name } = req.body || {};
@@ -202,6 +219,14 @@ app.post('/api/public/trade', publicAuth, handle(async (req, res) => {
 app.get('/api/public/inventory', publicAuth, handle(async (req, res) => {
   if (!req.query.phone) return res.status(400).json({ error: 'Falta ?phone=.' });
   res.json(await store.getUserInventory(String(req.query.phone)));
+}));
+// Drop pendiente de un grupo, directo de la BD: para que el !claim ya no
+// dependa de los datos estáticos de n8n. Devuelve { drop } con el drop
+// pendiente más reciente del grupo (enriquecido con carta, code, serie,
+// global_n y expires_at) o { drop: null } si no hay ninguno vigente.
+app.get('/api/public/pending-drop', publicAuth, handle(async (req, res) => {
+  if (!req.query.group_jid) return res.status(400).json({ error: 'Falta ?group_jid=.' });
+  res.json({ drop: await store.pendingDrop(String(req.query.group_jid)) });
 }));
 
 // ---- frontend estático ----

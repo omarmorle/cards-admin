@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS cards (
 CREATE TABLE IF NOT EXISTS users (
   phone         TEXT PRIMARY KEY,
   display_name  TEXT NOT NULL DEFAULT '',
+  last_daily_at TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -94,6 +95,10 @@ ALTER TABLE copies ADD COLUMN IF NOT EXISTS global_n INTEGER;
 ALTER TABLE copies ADD COLUMN IF NOT EXISTS code TEXT;
 ALTER TABLE drops ADD COLUMN IF NOT EXISTS global_n INTEGER;
 ALTER TABLE drops ADD COLUMN IF NOT EXISTS code TEXT;
+-- Base para el daily (futuro !daily): cuándo reclamó el usuario su
+-- última recompensa diaria. NULL = nunca. Todavía no hay endpoint ni
+-- comando que lo use; el !daily futuro leería y actualizaría este campo.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily_at TIMESTAMPTZ;
 
 -- Índices (después de los ALTER, ver el orden importante de arriba).
 CREATE INDEX IF NOT EXISTS idx_cards_series ON cards(series_id);

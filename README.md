@@ -106,6 +106,39 @@ también lo devuelve: `POST /api/public/roll` trae `code` y `global_n`,
 y las copias enriquecidas (`claim`, `gift`, `scrap`, `trade`,
 `inventory`, lista de Copias) traen el campo `code`.
 
+### Manejo de copias y usuarios desde el panel
+
+En la tabla de **Copias emitidas** cada copia tiene dos botones:
+
+- **Transferir** — pide el teléfono del nuevo dueño y mueve la copia
+  (si el teléfono no existe como usuario, se crea solo con su teléfono
+  como nombre). Queda registrada como una transacción `trade` del dueño
+  anterior al nuevo. No se puede transferir a uno mismo.
+- **Eliminar** — borra la copia (pide confirmación). El historial de
+  transacciones se conserva, pero sus `copy_id` quedan en NULL.
+
+En la lista de **Usuarios** cada usuario tiene el botón **Renombrar**
+para cambiar su `display_name`.
+
+Endpoints (sesión de admin):
+
+- `POST /api/admin/copies/:id/transfer` `{ to_phone }` → la copia
+  enriquecida (con su `code`). Errores: teléfono inválido o mismo dueño
+  → 400; copia inexistente → 404.
+- `DELETE /api/admin/copies/:id` → `{ ok: true }`. Copia inexistente
+  → 404.
+- `PUT /api/admin/users/:phone` `{ display_name }` → el usuario
+  actualizado. Nombre vacío → 400; usuario inexistente → 404.
+
+### Recompensas diarias (base lista, sin comando todavía)
+
+La tabla `users` ya tiene la columna `last_daily_at` (TIMESTAMPTZ,
+NULL = nunca ha reclamado). Todavía **no hay endpoint ni comando**
+`!daily`: es solo la base para agregarlo en el futuro. Un futuro
+`!daily` leería ese campo y, si ya pasaron 24 h (o es otro día
+calendario, según se defina), daría la recompensa y actualizaría
+`last_daily_at` a ahora.
+
 ## Rareza y sorteo
 
 Pesos base del sorteo (se renormalizan entre las rarezas que sí tengan
@@ -300,6 +333,12 @@ Ver el detalle y los nodos en `n8n/roll-claim-notes.md`. Resumen:
   copias quedan con `status: 'traded'` y se registran dos transacciones
   `trade` (una por copia). Devuelve `{ copy_a, copy_b, card_a, card_b }`.
 - `GET /api/public/inventory?phone=...` → copias de ese usuario con su Serie n/m y su `code`.
+- `GET /api/public/pending-drop?group_jid=...` → `{ drop }` con el drop
+  pendiente más reciente de ese grupo (enriquecido con carta, `code`,
+  `serie: "n/m"`, `global_n` y `expires_at`) o `{ drop: null }` si no
+  hay ninguno vigente. Sirve para que el `!claim` busque el drop
+  directo en la BD en vez de depender de los datos estáticos de n8n.
+  Falta `group_jid` → 400.
 - `GET /api/public/series` y `GET /api/public/cards?series_id=&rarity=` → catálogo (series y cartas traen su `code`).
 
 ### Qué significa `copies.status`

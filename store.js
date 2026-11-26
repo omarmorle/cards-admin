@@ -40,6 +40,14 @@ function stripAccents(s) {
 function normalizeCode(s) {
   return stripAccents(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
+// Teléfonos: dígitos con código de país, con + opcional al inicio.
+// Se normaliza quitando espacios y guiones antes de guardar/comparar.
+function normalizePhone(p) {
+  return String(p || '').replace(/[\s-]/g, '');
+}
+function validPhone(p) {
+  return /^\+?\d{7,15}$/.test(normalizePhone(p));
+}
 // Valida que un código tenga EXACTAMENTE 3 letras A-Z. Vacío → null
 // (el llamador genera uno automático). Cualquier otra cosa → error 400.
 function resolveCode(given, generated, label) {
@@ -325,7 +333,7 @@ class JsonStore extends BaseStore {
       const e = new Error('Ese número de serie ya fue asignado.'); e.status = 409; throw e;
     }
     if (!this.data.users.some(u => u.phone === phone)) {
-      this.data.users.push({ phone, display_name: display_name || '', created_at: new Date().toISOString() });
+      this.data.users.push({ phone, display_name: display_name || '', created_at: new Date().toISOString(), last_daily_at: null });
     }
     // El global_n se copia del drop que lo reservó. Un drop viejo sin
     // global_n (de antes de este cambio) reserva uno nuevo aquí.
@@ -346,7 +354,7 @@ class JsonStore extends BaseStore {
     if (copy.user_phone !== from_phone) { const e = new Error('Esa carta no es tuya.'); e.status = 409; throw e; }
     if (copy.status === 'scrapped') { const e = new Error('Esa carta fue desechada.'); e.status = 409; throw e; }
     if (!this.data.users.some(u => u.phone === to_phone)) {
-      this.data.users.push({ phone: to_phone, display_name: to_display_name || '', created_at: new Date().toISOString() });
+      this.data.users.push({ phone: to_phone, display_name: to_display_name || '', created_at: new Date().toISOString(), last_daily_at: null });
     }
     // status = cómo llegó la copia a su dueño actual: 'owned' (claim directo),
     // 'gifted' (regalo), 'traded' (intercambio), 'scrapped' (desechada).
@@ -378,7 +386,7 @@ class JsonStore extends BaseStore {
     if (a.status === 'scrapped' || b.status === 'scrapped') { const e = new Error('Una de las cartas fue desechada.'); e.status = 409; throw e; }
     for (const [phone, name] of [[phone_a, to_display_name_a], [phone_b, to_display_name_b]]) {
       if (!this.data.users.some(u => u.phone === phone)) {
-        this.data.users.push({ phone, display_name: name || '', created_at: new Date().toISOString() });
+        this.data.users.push({ phone, display_name: name || '', created_at: new Date().toISOString(), last_daily_at: null });
       }
     }
     a.user_phone = phone_b; a.status = 'traded';
@@ -389,6 +397,62 @@ class JsonStore extends BaseStore {
       { id: uid(), type: 'trade', copy_id: b.id, from_phone: phone_b, to_phone: phone_a, created_at: now });
     this._save();
     return { copy_a: this._enrichCopy(a), copy_b: this._enrichCopy(b), card_a: await this.getCard(a.card_id), card_b: await this.getCard(b.card_id) };
+  }
+  // ---- manejo admin de copias y usuarios (panel) ----
+  async transferCopy(copyId, toPhone) {
+    const to = normalizePhone(toPhone);
+    if (!validPhone(to)) { const e = new Error('Teléfono inválido. Usa solo dígitos con código de país (ej. 5215500000001).'); e.status = 400; throw e; }
+    const copy = this.data.copies.find(c => c.id === copyId);
+    if (!copy) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+    if (copy.user_phone === to) { const e = new Error('El nuevo dueño ya es el dueño de la copia.'); e.status = 400; throw e; }
+    // El usuario destino se crea solo, con su teléfono como nombre.
+    if (!this.data.users.some(u => u.phone === to)) {
+      this.data.users.push({ phone: to, display_name: to, created_at: new Date().toISOString(), last_daily_at: null });
+    }
+    const from = copy.user_phone;
+    copy.user_phone = to;
+    copy.status = 'traded';
+    this.data.transactions.push({ id: uid(), type: 'trade', copy_id: copy.id, from_phone: from, to_phone: to, created_at: new Date().toISOString() });
+    this._save();
+    return this._enrichCopy(copy);
+  }
+  async deleteCopy(copyId) {
+    const copy = this.data.copies.find(c => c.id === copyId);
+    if (!copy) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+    this.data.copies = this.data.copies.filter(c => c.id !== copyId);
+    // Como el ON DELETE SET NULL de Postgres: el historial sobrevive
+    // pero ya no apunta a la copia borrada.
+    for (const t of this.data.transactions) if (t.copy_id === copyId) t.copy_id = null;
+    this._save();
+    return true;
+  }
+  async renameUser(phone, displayName) {
+    const name = String(displayName || '').trim();
+    if (!name) { const e = new Error('El nombre no puede estar vacío.'); e.status = 400; throw e; }
+    const user = this.data.users.find(u => u.phone === phone);
+    if (!user) { const e = new Error('Ese usuario no existe.'); e.status = 404; throw e; }
+    user.display_name = name;
+    this._save();
+    return { ...user, copies: this.data.copies.filter(c => c.user_phone === phone).length };
+  }
+  _enrichDrop(d) {
+    const card = this.data.cards.find(c => c.id === d.card_id) || {};
+    const series = this.data.series.find(s => s.id === card.series_id) || {};
+    const code = d.code || (d.global_n != null
+      ? buildCopyCode(fallbackSeriesCode(series), fallbackCardCode(card), d.global_n, d.serial_n)
+      : '');
+    return { ...d, card_name: card.name || '', series_name: series.name || '', series_id: card.series_id || '', team_or_group: card.team_or_group || '', rarity: card.rarity || '', image_url: card.image_url || '', serie: `${d.serial_n}/${d.serial_m}`, code };
+  }
+  // Drop pendiente de un grupo, directo de la BD (para que el !claim ya
+  // no dependa de los datos estáticos de n8n). Primero expira los
+  // vencidos, como ya hace el roll. null si no hay ninguno vigente.
+  async pendingDrop(groupJid) {
+    await this.expireDrops();
+    const now = new Date();
+    const pending = this.data.drops
+      .filter(d => d.status === 'pending' && d.group_jid === groupJid && new Date(d.expires_at) > now)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    return pending.length ? this._enrichDrop(pending[0]) : null;
   }
   async seedIfEmpty(seed) {
     if (this.data.series.length) return { seeded: false };
@@ -694,6 +758,78 @@ class PgStore extends BaseStore {
       if (e.status) throw e;
       throw e;
     } finally { client.release(); }
+  }
+  // ---- manejo admin de copias y usuarios (panel) ----
+  async transferCopy(copyId, toPhone) {
+    const to = normalizePhone(toPhone);
+    if (!validPhone(to)) { const e = new Error('Teléfono inválido. Usa solo dígitos con código de país (ej. 5215500000001).'); e.status = 400; throw e; }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const cr = await client.query('SELECT * FROM copies WHERE id=$1 FOR UPDATE', [copyId]);
+      const copy = cr.rows[0];
+      if (!copy) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+      if (copy.user_phone === to) { const e = new Error('El nuevo dueño ya es el dueño de la copia.'); e.status = 400; throw e; }
+      // El usuario destino se crea solo, con su teléfono como nombre.
+      await client.query('INSERT INTO users(phone, display_name) VALUES($1,$1) ON CONFLICT (phone) DO NOTHING', [to]);
+      const upd = await client.query(
+        `UPDATE copies SET user_phone=$2, status='traded' WHERE id=$1 RETURNING *`,
+        [copyId, to]);
+      await client.query(`INSERT INTO transactions(id, type, copy_id, from_phone, to_phone) VALUES($1,'trade',$2,$3,$4)`, [uid(), copyId, copy.user_phone, to]);
+      await client.query('COMMIT');
+      return this._enrichPgCopy(upd.rows[0]);
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      if (e.status) throw e;
+      throw e;
+    } finally { client.release(); }
+  }
+  async deleteCopy(copyId) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const cr = await client.query('SELECT id FROM copies WHERE id=$1 FOR UPDATE', [copyId]);
+      if (!cr.rows[0]) { const e = new Error('Esa copia no existe.'); e.status = 404; throw e; }
+      // transactions.copy_id pasa a NULL solo por el ON DELETE SET NULL.
+      await client.query('DELETE FROM copies WHERE id=$1', [copyId]);
+      await client.query('COMMIT');
+      return true;
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      if (e.status) throw e;
+      throw e;
+    } finally { client.release(); }
+  }
+  async renameUser(phone, displayName) {
+    const name = String(displayName || '').trim();
+    if (!name) { const e = new Error('El nombre no puede estar vacío.'); e.status = 400; throw e; }
+    const r = await this.pool.query(
+      `UPDATE users SET display_name=$2 WHERE phone=$1 RETURNING *`, [phone, name]);
+    if (!r.rows[0]) { const e = new Error('Ese usuario no existe.'); e.status = 404; throw e; }
+    const copies = (await this.pool.query('SELECT COUNT(*)::int AS n FROM copies WHERE user_phone=$1', [phone])).rows[0].n;
+    return { ...r.rows[0], copies };
+  }
+  // Drop pendiente de un grupo, directo de la BD (para que el !claim ya
+  // no dependa de los datos estáticos de n8n). Primero expira los
+  // vencidos, como ya hace el roll. null si no hay ninguno vigente.
+  async pendingDrop(groupJid) {
+    await this.expireDrops();
+    const r = await this.pool.query(
+      `SELECT d.*, c.name AS card_name, c.series_id, c.code AS card_code, c.team_or_group, c.rarity, c.image_url,
+              s.name AS series_name, s.code AS series_code,
+              (d.serial_n || '/' || d.serial_m) AS serie
+       FROM drops d JOIN cards c ON c.id=d.card_id JOIN series s ON s.id=c.series_id
+       WHERE d.group_jid=$1 AND d.status='pending' AND d.expires_at > NOW()
+       ORDER BY d.created_at DESC LIMIT 1`,
+      [groupJid]);
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      ...row,
+      code: row.code || (row.global_n != null
+        ? buildCopyCode(fallbackSeriesCode({ code: row.series_code, name: row.series_name }), fallbackCardCode({ code: row.card_code, name: row.card_name }), row.global_n, row.serial_n)
+        : ''),
+    };
   }
   async seedIfEmpty(seed) {
     const n = (await this.pool.query('SELECT COUNT(*)::int AS n FROM series')).rows[0].n;
